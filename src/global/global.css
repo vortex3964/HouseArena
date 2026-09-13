@@ -1,0 +1,91 @@
+/* We will only have dark theme catpuchin inspired */
+:root {
+  --ctp-crust: #06060c; /* deepest splash / tab bar */
+  --ctp-mantle: #0d0a18; /* soft bg drawer / header */
+  --ctp-base: #141122; /* main app bg */
+  --ctp-surface-0: #1c1832; /* cards */
+  --ctp-surface-1: #261f45; /* cards hover / pressed */
+  --ctp-surface-2: #352a5e; /* elevated / modal */
+
+  /* — Semantic backgrounds — */
+  --bg-deep: var(--ctp-crust);
+  --bg-soft: var(--ctp-mantle);
+  --bg: var(--ctp-base);
+  --card: var(--ctp-surface-0);
+  --card-hover: var(--ctp-surface-1);
+  --elevated: var(--ctp-surface-2);
+
+  /* — Borders (tinted, never grey) — */
+  --border-soft: rgba(180, 190, 254, 0.12);
+  --border: rgba(180, 190, 254, 0.2);
+  --border-strong: rgba(203, 166, 247, 0.38);
+
+  /* — Text (Catppuccin Mocha text scale) — */
+  --text: #e9e5fb; /* brighter than stock mocha for contrast on richer black */
+  --subtext-1: #bac2de;
+  --subtext-0: #9ea2c4;
+  --muted: #76709a; /* muted purple-grey, not neutral grey */
+  --disabled: #4c4670;
+
+  /* — Catppuccin accents (Mocha) */
+  --rosewater: #f5e0dc;
+  --flamingo: #f2cdcd;
+  --pink: #f5c2e7;
+  --mauve: #cba6f7; /* primary brand */
+  --red: #f38ba8;
+  --maroon: #eba0ac;
+  --peach: #fab387;
+  --yellow: #f9e2af;
+  --green: #a6e3a1;
+  --teal: #94e2d5;
+  --sky: #89dceb;
+  --sapphire: #74c7ec;
+  --blue: #89b4fa;
+  --lavender: #b4befe;
+
+  /* — Semantic actions — */
+  --primary: var(--mauve);
+  --primary-soft: rgba(203, 166, 247, 0.14);
+  --primary-strong: #d9bcff;
+  --on-primary: #1a1030; /* text on top of primary buttons */
+  --secondary: var(--lavender);
+  --accent: var(--pink);
+  --success: var(--green);
+  --warning: var(--yellow);
+  --danger: var(--red);
+  --info: var(--blue);
+
+  /* — Shadows / glows (purple tinted) — */
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+  --glow-primary: 0 0 24px rgba(203, 166, 247, 0.35);
+
+  color-scheme: dark;
+}
+
+/* Base element styling (web only, ignored by native) */
+body {
+  background-color: var(--bg);
+  color: var(--text);
+}
+
+::selection {
+  background: rgba(203, 166, 247, 0.35);
+  color: var(--text);
+}
+
+/* Slim tinted scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ctp-surface-2) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--ctp-surface-2);
+  border-radius: 99px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
