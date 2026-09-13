@@ -1,79 +1,17 @@
-import { useEffect } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { Platform, Pressable, useWindowDimensions } from "react-native";
-import { Drawer } from "expo-router/drawer";
-import { useNavigation } from "expo-router";
+import { useWindowDimensions } from "react-native";
+import { Drawer, DrawerToggleButton } from "expo-router/drawer";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
-
-type WebDocument = {
-  activeElement?: { blur?: () => void } | null;
-  addEventListener?: (
-    type: string,
-    listener: (e: unknown) => void,
-    options?: boolean,
-  ) => void;
-  removeEventListener?: (
-    type: string,
-    listener: (e: unknown) => void,
-    options?: boolean,
-  ) => void;
-};
-
-function getWebDocument(): WebDocument | undefined {
-  if (Platform.OS !== "web") return undefined;
-  return (globalThis as unknown as { document?: WebDocument }).document;
-}
-
-function blurWebFocus() {
-  getWebDocument()?.activeElement?.blur?.();
-}
-
-function ThemedDrawerToggle() {
-  const navigation = useNavigation() as unknown as {
-    toggleDrawer?: () => void;
-  };
-  return (
-    <Pressable
-      onPress={() => {
-        blurWebFocus(); // blur BEFORE the drawer opens
-        navigation.toggleDrawer?.();
-      }}
-      hitSlop={12}
-      style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 12 }}
-      accessibilityRole="button"
-      accessibilityLabel="Show navigation menu"
-    >
-      <Ionicons name="menu" size={24} color={Colors.text} />
-    </Pressable>
-  );
-}
 
 export default function RootLayout() {
   const { width } = useWindowDimensions();
   const drawerWidth = Math.round(width * 0.65);
-
-  useEffect(() => {
-    const doc = getWebDocument();
-    if (!doc?.addEventListener || !doc?.removeEventListener) return;
-    const onClickCapture = (e: unknown) => {
-      const target = (e as { target?: unknown }).target as
-        { closest?: (selector: string) => unknown } | null | undefined;
-      if (target?.closest?.('[aria-label="Close drawer"]')) {
-        blurWebFocus();
-      }
-    };
-    doc.addEventListener("click", onClickCapture, true);
-    return () => doc.removeEventListener?.("click", onClickCapture, true);
-  }, []);
-
   return (
-    <GestureHandlerRootView style={{ flex: 1, backgroundColor: Colors.bgDeep }}>
+    <GestureHandlerRootView
+      style={{ flex: 1, backgroundColor: Colors.bgDeep }}
+    >
       <Drawer
-        screenListeners={{
-          // Fires synchronously before the drawer closes on item press.
-          drawerItemPress: () => blurWebFocus(),
-        }}
         screenOptions={{
           drawerPosition: "left",
           drawerType: "front",
@@ -81,7 +19,7 @@ export default function RootLayout() {
           swipeEdgeWidth: 60,
           overlayColor: "rgba(6, 6, 12, 0.6)",
 
-          headerLeft: () => <ThemedDrawerToggle />,
+          headerLeft: () => <DrawerToggleButton tintColor={Colors.text} />,
           headerStyle: { backgroundColor: Colors.mantle },
           headerTintColor: Colors.text,
           headerTitleStyle: { color: Colors.text, fontWeight: "600" },
@@ -115,6 +53,56 @@ export default function RootLayout() {
             title: "HouseArena",
             drawerIcon: ({ color, size }) => (
               <Ionicons name="home" size={size} color={color} />
+            ),
+          }}
+        />
+        <Drawer.Screen
+          name="household"
+          options={{
+            drawerLabel: "Household",
+            title: "Household",
+            drawerIcon: ({ color, size }) => (
+              <Ionicons name="people" size={size} color={color} />
+            ),
+          }}
+        />
+        <Drawer.Screen
+          name="favourites"
+          options={{
+            drawerLabel: "Favourites",
+            title: "Favourites",
+            drawerIcon: ({ color, size }) => (
+              <Ionicons name="heart" size={size} color={color} />
+            ),
+          }}
+        />
+        <Drawer.Screen
+          name="leaderboard"
+          options={{
+            drawerLabel: "Leaderboard",
+            title: "Leaderboard",
+            drawerIcon: ({ color, size }) => (
+              <Ionicons name="trophy" size={size} color={color} />
+            ),
+          }}
+        />
+        <Drawer.Screen
+          name="stats"
+          options={{
+            drawerLabel: "Stats",
+            title: "Stats",
+            drawerIcon: ({ color, size }) => (
+              <Ionicons name="bar-chart" size={size} color={color} />
+            ),
+          }}
+        />
+        <Drawer.Screen
+          name="logs"
+          options={{
+            drawerLabel: "Logs",
+            title: "Logs",
+            drawerIcon: ({ color, size }) => (
+              <Ionicons name="list" size={size} color={color} />
             ),
           }}
         />
