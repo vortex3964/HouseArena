@@ -110,14 +110,13 @@ CREATE OR REPLACE FUNCTION complete_task(p_task_id INTEGER, p_user_id UUID)
 RETURNS tasks AS $$
 DECLARE
     completed tasks;
-    awarded_points INTEGER;
 BEGIN
     UPDATE tasks
     SET status = 'completed'
     WHERE id = p_task_id
       AND owner = p_user_id
       AND status = 'taken'
-    RETURNING *, points INTO completed, awarded_points;
+    RETURNING * INTO completed;
 
     IF completed IS NULL THEN
         RAISE EXCEPTION 'Task % cannot be completed by this user (not owned or not taken)', p_task_id
@@ -125,7 +124,7 @@ BEGIN
     END IF;
 
     UPDATE profiles
-    SET points = points + awarded_points
+    SET points = points + completed.points
     WHERE id = p_user_id;
 
     RETURN completed;
@@ -257,4 +256,4 @@ using ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[
 create policy "Users can delete their own avatar"
 on storage.objects for delete
 to authenticated
-using ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1] );
+using ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1] );ing ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1] );
