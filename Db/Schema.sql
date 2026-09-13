@@ -257,3 +257,45 @@ create policy "Users can delete their own avatar"
 on storage.objects for delete
 to authenticated
 using ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1] );ing ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1] );
+
+-- activity logging
+ 
+CREATE TABLE activity_logs (
+    id BIGSERIAL PRIMARY KEY,
+    owner VARCHAR(20),
+    details TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+ 
+ALTER TABLE activity_logs ENABLE ROW LEVEL SECURITY;
+ 
+-- authenticated users can read logs
+CREATE POLICY "Activity logs are viewable by authenticated users"
+ON activity_logs FOR SELECT
+TO authenticated
+USING (true);
+ 
+-- keeps only the 30 most recent rows, oldest dropped first
+CREATE OR REPLACE FUNCTION prune_activity_logs()
+RETURNS TRIGGER AS $$
+BEGIN
+    DELETE FROM activity_logs
+    WHERE id NOT IN (
+        SELECT id FROM activity_logs
+        ORDER BY created_at DESC
+        LIMIT 30
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+ 
+CREATE TRIGGER trg_prune_activity_logs
+AFTER INSERT ON activity_logs
+FOR EACH ROW
+EXECUTE FUNCTION prune_activity_logs();
+ 
+-- returns all logs, most recent first
+CREATE OR REPLACE FUNCTION get_activity_logs()
+RETURNS SETOF activity_logs AS $$
+    SELECT * FROM activity_logs ORDER BY created_at DESC;
+$$ LANGUAGE sql;
