@@ -3,6 +3,7 @@ import { useWindowDimensions } from "react-native";
 import { Drawer, DrawerToggleButton } from "expo-router/drawer";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
+import { TopBar } from "../components/top_bar";
 
 export default function RootLayout() {
   const { width } = useWindowDimensions();
@@ -13,6 +14,8 @@ export default function RootLayout() {
     >
       <Drawer
         screenOptions={{
+          header: () => <TopBar />,
+
           drawerPosition: "left",
           drawerType: "front",
           swipeEnabled: true,
