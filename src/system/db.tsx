@@ -60,17 +60,24 @@ export async function signUpWithEmail(
 // Login keeps asking username + password only.
 // Step 1 resolves the username to its email (works while logged out).
 // Step 2 signs in with that email. Wrong names report "no account".
+// Returns the user id from the session, so callers skip an extra getUser.
 export async function signInWithUsername(
   client: SupabaseClient,
   username: string,
   password: string,
-) {
+): Promise<string> {
   const uErr = validateUsername(username);
   if (uErr) throw new Error(uErr);
   if (!password) throw new Error("Type your password.");
   const email = await resolveEmailForUsername(client, username);
-  const { error } = await client.auth.signInWithPassword({ email, password });
+  const { data, error } = await client.auth.signInWithPassword({
+    email,
+    password,
+  });
   if (error) throw new Error(friendlyAuthError(error));
+  const uid = data.session?.user?.id ?? null;
+  if (!uid) throw new Error("Login worked but no user was returned.");
+  return uid;
 }
 
 // Calls the public RPC. Returns the email or throws when unknown.

@@ -16,6 +16,7 @@ import {
   fetchMyProfile,
   joinHouseholdByCode,
   leaveHousehold,
+  qk,
   queryClient,
   signInWithUsername,
   signUpWithEmail,
@@ -72,25 +73,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Loads profile plus household list after login, signup, or app start.
   // Fetch failures are recorded instead of looking like empty data.
+  // Results are seeded into the TanStack cache so hooks read warm data.
   const loadSessionData = useCallback(
     async (c: SupabaseClient, userId: string) => {
       setDataLoading(true);
       setDataError(null);
       try {
-        let p: Profile | null = null;
-        let homes: MyHousehold[] = [];
-        try {
-          p = await fetchMyProfile(c, userId);
-        } catch (e) {
-          setDataError(e instanceof Error ? e.message : String(e));
-        }
-        try {
-          homes = await fetchMyHouseholds(c, userId);
-        } catch (e) {
-          setDataError(e instanceof Error ? e.message : String(e));
-        }
+        const [pRes, hRes] = await Promise.allSettled([
+          fetchMyProfile(c, userId),
+          fetchMyHouseholds(c, userId),
+        ]);
+        const p = pRes.status === "fulfilled" ? pRes.value : null;
+        const homes = hRes.status === "fulfilled" ? hRes.value : [];
+        if (pRes.status === "rejected")
+          setDataError(
+            pRes.reason instanceof Error
+              ? pRes.reason.message
+              : String(pRes.reason),
+          );
+        if (hRes.status === "rejected")
+          setDataError(
+            hRes.reason instanceof Error
+              ? hRes.reason.message
+              : String(hRes.reason),
+          );
         setProfile(p);
         setHouseholds(homes);
+        queryClient.setQueryData(qk.myProfile(userId), p);
+        queryClient.setQueryData(qk.myHouseholds(userId), homes);
       // Keep the remembered household when still a member of it,
       // otherwise fall back to the first one.
       const saved = await AsyncStorage.getItem(ACTIVE_KEY).catch(() => null);
@@ -135,12 +145,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [loadSessionData]);
 
-  // Keep session and data in sync. Token refreshes need no reload.
+  // Keep session and data in sync. Boot owns the initial load and
+  // token refreshes need none, so both events are skipped here.
   useEffect(() => {
     if (!client) return;
     const { data: sub } = client.auth.onAuthStateChange(
       async (event, session) => {
-        if (event === "TOKEN_REFRESHED") return;
+        if (event === "TOKEN_REFRESHED" || event === "INITIAL_SESSION")
+          return;
         const uid = session?.user?.id ?? null;
         setSessionUserId(uid);
         if (uid) await loadSessionData(client, uid);
@@ -156,6 +168,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => sub.subscription.unsubscribe();
   }, [client, loadSessionData]);
 
+  // Live points and gems. One channel filtered to our own profile row,
+  // payload merged straight into state, so point changes arrive with
+  // zero extra SELECTs. Unsubscribed on logout or account switch.
+  useEffect(() => {
+    if (!client || !sessionUserId) return;
+    const channel = client
+      .channel(`profile-${sessionUserId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "profiles",
+          filter: `id=eq.${sessionUserId}`,
+        },
+        (payload) => {
+          const next = payload.new as Profile;
+          setProfile((prev) => (prev ? { ...prev, ...next } : next));
+          queryClient.setQueryData<Profile | null>(
+            qk.myProfile(sessionUserId),
+            (old) => (old ? { ...old, ...next } : next),
+          );
+        },
+      )
+      .subscribe();
+    return () => {
+      client.removeChannel(channel);
+    };
+  }, [client, sessionUserId]);
+
   const configureBackend = useCallback(async (url: string, anonKey: string) => {
     const c = await connectBackend(url, anonKey);
     setClient(c);
@@ -167,22 +209,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return client;
   }, [client]);
 
+  // SIGNED_IN from the listener below drives the data load,
+  // so this only authenticates and reports the user id.
   const signIn = useCallback(
     async (username: string, password: string) => {
       const c = ensureClient();
       setAuthLoading(true);
       try {
-        await signInWithUsername(c, username, password);
-        const { data } = await c.auth.getUser();
-        const uid = data.user?.id ?? null;
-        if (!uid) throw new Error("Login worked but no user was returned.");
+        const uid = await signInWithUsername(c, username, password);
         setSessionUserId(uid);
-        await loadSessionData(c, uid);
       } finally {
         setAuthLoading(false);
       }
     },
-    [ensureClient, loadSessionData],
+    [ensureClient],
   );
 
   const signUp = useCallback(
@@ -190,9 +230,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const c = ensureClient();
       setAuthLoading(true);
       try {
-        await signUpWithEmail(c, email, username, password);
-        const { data } = await c.auth.getUser();
-        const user = data.user;
+        const { session } = await signUpWithEmail(c, email, username, password);
+        const user = session?.user ?? null;
         if (!user) {
           // No session yet means the email is not confirmed.
           throw new Error(
@@ -201,13 +240,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           );
         }
         setSessionUserId(user.id);
-        await loadSessionData(c, user.id);
         return { userId: user.id };
       } finally {
         setAuthLoading(false);
       }
     },
-    [ensureClient, loadSessionData],
+    [ensureClient],
+  );
+
+  // Household changes never touch points or gems, so only the
+  // household list is reloaded here instead of the full session data.
+  const refreshHouseholds = useCallback(
+    async (c: SupabaseClient, userId: string) => {
+      const homes = await fetchMyHouseholds(c, userId);
+      setHouseholds(homes);
+      queryClient.setQueryData(qk.myHouseholds(userId), homes);
+      return homes;
+    },
+    [],
   );
 
   const createHouseholdCb = useCallback(
@@ -215,12 +265,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const c = ensureClient();
       if (!sessionUserId) throw new Error("You must be logged in.");
       const home = await createHousehold(c, name);
-      await loadSessionData(c, sessionUserId);
+      await refreshHouseholds(c, sessionUserId);
       setActiveId(home.id);
       await AsyncStorage.setItem(ACTIVE_KEY, String(home.id)).catch(() => {});
       return home;
     },
-    [ensureClient, sessionUserId, loadSessionData],
+    [ensureClient, sessionUserId, refreshHouseholds],
   );
 
   const joinHousehold = useCallback(
@@ -228,12 +278,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const c = ensureClient();
       if (!sessionUserId) throw new Error("You must be logged in.");
       const home = await joinHouseholdByCode(c, code);
-      await loadSessionData(c, sessionUserId);
+      await refreshHouseholds(c, sessionUserId);
       setActiveId(home.id);
       await AsyncStorage.setItem(ACTIVE_KEY, String(home.id)).catch(() => {});
       return home;
     },
-    [ensureClient, sessionUserId, loadSessionData],
+    [ensureClient, sessionUserId, refreshHouseholds],
   );
 
   const leaveActiveHousehold = useCallback(async () => {
@@ -241,8 +291,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!sessionUserId || activeId == null)
       throw new Error("No active household.");
     await leaveHousehold(c, activeId);
-    await loadSessionData(c, sessionUserId);
-  }, [ensureClient, sessionUserId, activeId, loadSessionData]);
+    const homes = await refreshHouseholds(c, sessionUserId);
+    const next = homes.length > 0 ? homes[0].household.id : null;
+    setActiveId(next);
+    if (next != null)
+      await AsyncStorage.setItem(ACTIVE_KEY, String(next)).catch(() => {});
+    else await AsyncStorage.removeItem(ACTIVE_KEY).catch(() => {});
+  }, [ensureClient, sessionUserId, activeId, refreshHouseholds]);
 
   // Stored id is a hint only, it must belong to the current list.
   const setActiveHousehold = useCallback(

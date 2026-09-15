@@ -3,13 +3,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DrawerToggleButton } from "expo-router/drawer";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
-
-//TODO: remove these and implement a live point and gem counter feature
-const MOCK_POINTS: Number = 6000;
-const MOCK_GEMS: Number = 32;
+import { useAuth } from "../system/AuthProvider";
 
 export function TopBar() {
   const insets = useSafeAreaInsets();
+  // Live values from the realtime profile subscription, null until loaded.
+  const { profile } = useAuth();
 
   return (
     <View style={[styles.bar, { paddingTop: insets.top }]}>
@@ -18,12 +17,16 @@ export function TopBar() {
       <View style={styles.counters}>
         <View style={styles.box}>
           <Ionicons name="star" size={16} color={Colors.peach} />
-          <Text style={styles.count}>{MOCK_POINTS.toLocaleString()}</Text>
+          <Text style={styles.count}>
+            {(profile?.points ?? 0).toLocaleString()}
+          </Text>
         </View>
 
         <View style={styles.box}>
           <Ionicons name="diamond" size={16} color={Colors.teal} />
-          <Text style={styles.count}> {MOCK_GEMS.toLocaleString()} </Text>
+          <Text style={styles.count}>
+            {(profile?.gems ?? 0).toLocaleString()}
+          </Text>
         </View>
       </View>
 

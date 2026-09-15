@@ -776,3 +776,30 @@ DO $$ BEGIN
 END $$;
 
 REVOKE ALL ON FUNCTION release_tasks_on_leave() FROM PUBLIC, anon, authenticated;
+
+-- leave the realtime publication until a live screen needs them back.
+-- Re-add with: ALTER PUBLICATION supabase_realtime ADD TABLE public.tasks;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'households') THEN
+    ALTER PUBLICATION supabase_realtime DROP TABLE public.households;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'household_members') THEN
+    ALTER PUBLICATION supabase_realtime DROP TABLE public.household_members;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'tasks') THEN
+    ALTER PUBLICATION supabase_realtime DROP TABLE public.tasks;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'activity_logs') THEN
+    ALTER PUBLICATION supabase_realtime DROP TABLE public.activity_logs;
+  END IF;
+END $$;
+
+-- Logs RPC matches the 30-row prune cap instead of open-ended history.
+CREATE OR REPLACE FUNCTION get_household_logs(p_household_id INTEGER)
+RETURNS SETOF activity_logs AS $$
+    SELECT * FROM public.activity_logs
+    WHERE household_id = p_household_id
+      AND is_household_member(p_household_id)
+    ORDER BY created_at DESC
+    LIMIT 30;
+$$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public;
