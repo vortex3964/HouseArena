@@ -18,8 +18,11 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
 import { TopBar } from "../components/top_bar";
+import { ErrorBanner, PrimaryButton } from "../components/auth_ui";
 import { AuthProvider, useAuth } from "../system/AuthProvider";
 import { queryClient } from "../system/db";
+import { useLiveHousehold } from "../system/live";
+import { setupNotificationHandler } from "../system/push";
 
 const AUTH_ROUTES = ["login", "register"];
 const SETUP_ROUTE = "household-setup";
@@ -32,6 +35,8 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     households,
     setupSkipped,
     dataError,
+    bootError,
+    retryBoot,
   } = useAuth();
   const segments = useSegments();
   const current = segments[segments.length - 1] as string | undefined;
@@ -40,10 +45,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     if (initLoading || dataLoading) return;
     const onAuthRoute = current && AUTH_ROUTES.includes(current);
     const onSetupRoute = current === SETUP_ROUTE;
-    // Email confirmation landing, part of the login flow itself.
-    const onCallbackRoute = segments[0] === "auth";
-    if (!sessionUserId && !onAuthRoute && !onCallbackRoute)
-      router.replace("/login");
+    if (!sessionUserId && !onAuthRoute) router.replace("/login");
     else if (sessionUserId && onAuthRoute) router.replace("/");
     // Logged in but homeless: force setup unless skipped this login.
     // Skipped when data failed to load, empty then means unknown.
@@ -80,12 +82,40 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       </View>
     );
   }
+  // Boot failed instead of hanging: say so with a way back.
+  // Built from auth_ui components only, so this card itself can't crash.
+  if (bootError) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: Colors.bgDeep,
+          justifyContent: "center",
+          padding: 32,
+          gap: 14,
+        }}
+      >
+        <ErrorBanner
+          message={`Couldn't start the app. ${bootError}`}
+        />
+        <PrimaryButton title="Retry" onPress={retryBoot} />
+      </View>
+    );
+  }
   return <>{children}</>;
 }
 
 function AppDrawer() {
   const { width } = useWindowDimensions();
   const drawerWidth = Math.round(width * 0.65);
+  // App-wide live board: one channel for the active household, no UI.
+  // Screens just read the TanStack cache through the board hooks.
+  const { client, sessionUserId, activeHousehold } = useAuth();
+  useLiveHousehold(
+    client,
+    sessionUserId,
+    activeHousehold ? activeHousehold.household.id : null,
+  );
   return (
     <GestureHandlerRootView
       style={{ flex: 1, backgroundColor: Colors.bgDeep }}
@@ -222,14 +252,6 @@ function AppDrawer() {
             title: "Settings",
           }}
         />
-        <Drawer.Screen
-          name="auth/callback"
-          options={{
-            drawerItemStyle: { display: "none" },
-            headerShown: false,
-            swipeEnabled: false,
-          }}
-        />
       </Drawer>
     </GestureHandlerRootView>
   );
@@ -300,6 +322,9 @@ function CustomDrawerContent(props: DrawerContentComponentProps) {
 }
 
 export default function RootLayout() {
+  useEffect(() => {
+    setupNotificationHandler();
+  }, []);
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>

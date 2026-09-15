@@ -6,14 +6,20 @@
 
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { createURL } from "expo-linking";
 import {
   friendlyAuthError,
   validateEmail,
   validatePassword,
   validateUsername,
 } from "./supabase";
-import type { Household, MyHousehold, Profile } from "./obj_types";
+import type {
+  ActivityLog,
+  Household,
+  HouseholdMember,
+  MyHousehold,
+  Profile,
+  Task,
+} from "./obj_types";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -24,6 +30,9 @@ export const queryClient = new QueryClient({
 export const qk = {
   myHouseholds: (userId: string | null) => ["my-households", userId] as const,
   myProfile: (userId: string | null) => ["profile", userId] as const,
+  tasks: (householdId: number | null) => ["tasks", householdId] as const,
+  logs: (householdId: number | null) => ["logs", householdId] as const,
+  members: (householdId: number | null) => ["members", householdId] as const,
 };
 
 // Auth.
@@ -43,15 +52,9 @@ export async function signUpWithEmail(
   const pErr = validatePassword(password);
   if (pErr) throw new Error(pErr);
   const { data, error } = await client.auth.signUp({
-    email: email.trim(),
+    email: email.trim().toLowerCase(),
     password,
-    options: {
-      data: { username: username.trim() },
-      // After tapping the confirmation mail, Supabase sends the user
-      // back into the app instead of a localhost page phones can't open.
-      // In Expo Go this is an exp:// URL, in builds housearena://.
-      emailRedirectTo: createURL("auth/callback"),
-    },
+    options: { data: { username: username.trim() } },
   });
   if (error) throw new Error(friendlyAuthError(error));
   return data;
@@ -181,6 +184,68 @@ export async function leaveHousehold(
   if (error) throw new Error(error.message);
 }
 
+// Live board data. Column lists stay narrow and every list is capped,
+// realtime merges keep them fresh without refetching.
+
+// Tasks of one household, oldest first for board order.
+export async function fetchHouseholdTasks(
+  client: SupabaseClient,
+  householdId: number,
+): Promise<Task[]> {
+  const { data, error } = await client
+    .from("tasks")
+    .select(
+      "id,title,description,difficulty,points,status,household_id,owner,created_by,created_at",
+    )
+    .eq("household_id", householdId)
+    .order("created_at", { ascending: true })
+    .limit(50);
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Task[];
+}
+
+// Recent activity of one household, newest first, capped like the prune.
+export async function fetchHouseholdLogs(
+  client: SupabaseClient,
+  householdId: number,
+): Promise<ActivityLog[]> {
+  const { data, error } = await client.rpc("get_household_logs", {
+    p_household_id: householdId,
+  });
+  if (error) throw new Error(error.message);
+  return (data ?? []) as ActivityLog[];
+}
+
+// Members with public profile fields only, never emails.
+export async function fetchHouseholdMembers(
+  client: SupabaseClient,
+  householdId: number,
+): Promise<HouseholdMember[]> {
+  const { data, error } = await client
+    .from("household_members")
+    .select(
+      "household_id,profile_id,role,joined_at,profile:profiles(id,username,avatar_url,points,gems,wins)",
+    )
+    .eq("household_id", householdId)
+    .order("joined_at", { ascending: true })
+    .limit(50);
+  if (error) throw new Error(error.message);
+  const rows = (data ?? []) as unknown as Array<{
+    household_id: number;
+    profile_id: string;
+    role: HouseholdMember["role"];
+    joined_at: string;
+    profile: Profile | Profile[] | null;
+  }>;
+  return rows.map((r) => ({
+    household_id: r.household_id,
+    profile_id: r.profile_id,
+    role: r.role,
+    joined_at: r.joined_at,
+    profile: Array.isArray(r.profile) ? (r.profile[0] ?? undefined) : (r.profile ?? undefined),
+  }));
+}
+
 // TanStack hooks.
 
 export function useMyHouseholds(
@@ -202,5 +267,40 @@ export function useMyProfile(
     queryKey: qk.myProfile(userId),
     enabled: !!client && !!userId,
     queryFn: () => fetchMyProfile(client!, userId!),
+  });
+}
+
+// Board hooks. Enabled only with a household, so logged-out screens
+// and the homeless state cost zero queries.
+export function useHouseholdTasks(
+  client: SupabaseClient | null,
+  householdId: number | null,
+) {
+  return useQuery({
+    queryKey: qk.tasks(householdId),
+    enabled: !!client && householdId != null,
+    queryFn: () => fetchHouseholdTasks(client!, householdId!),
+  });
+}
+
+export function useHouseholdLogs(
+  client: SupabaseClient | null,
+  householdId: number | null,
+) {
+  return useQuery({
+    queryKey: qk.logs(householdId),
+    enabled: !!client && householdId != null,
+    queryFn: () => fetchHouseholdLogs(client!, householdId!),
+  });
+}
+
+export function useHouseholdMembers(
+  client: SupabaseClient | null,
+  householdId: number | null,
+) {
+  return useQuery({
+    queryKey: qk.members(householdId),
+    enabled: !!client && householdId != null,
+    queryFn: () => fetchHouseholdMembers(client!, householdId!),
   });
 }

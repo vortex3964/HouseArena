@@ -108,6 +108,9 @@ export function useFieldScroller() {
   const wrapRef = useRef<View>(null);
 
   const onFocusInput = useCallback(() => {
+    // Web scrolls focused inputs into view by itself, and its
+    // findNodeHandle throws instead of measuring, so skip it there.
+    if (Platform.OS === "web") return;
     const node = findNodeHandle(wrapRef.current);
     const parent = scroller?.getScrollHandle();
     if (node != null && parent != null) {

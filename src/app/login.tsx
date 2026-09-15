@@ -1,8 +1,13 @@
 import { useRef, useState } from "react";
-import { StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Link, router } from "expo-router";
 import { useAuth } from "../system/AuthProvider";
-import { getDevPrefill, isBackendDownError } from "../system/supabase";
+import {
+  getBackendConfigSync,
+  getDevPrefill,
+  isBackendDownError,
+} from "../system/supabase";
+import { requestResetCode, confirmResetCode } from "../system/push";
 import { Colors } from "../global/theme";
 import {
   AuthScreen,
@@ -31,6 +36,15 @@ export default function Login() {
   // True only after login fails with a network-like error.
   const [backendDown, setBackendDown] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Forgot password box, hidden until the link below is tapped.
+  const [showReset, setShowReset] = useState(false);
+  const [resetStep, setResetStep] = useState<"email" | "code">("email");
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetCode, setResetCode] = useState("");
+  const [resetPw, setResetPw] = useState("");
+  const [resetConfirm, setResetConfirm] = useState("");
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
 
   // Example: fresh install has backendReady false, so this is true
   // and the code fields show. Normal login has it false, so you
@@ -60,6 +74,52 @@ export default function Login() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       if (isBackendDownError(e)) setBackendDown(true);
+    }
+  }
+
+  // Step 1 pushes a reset code to the account owner's device.
+  // Answer stays generic so the box cannot probe which emails exist.
+  async function onReset() {
+    setResetMsg(null);
+    const cfg = getBackendConfigSync();
+    if (!cfg) {
+      setResetMsg("Connect your backend first.");
+      return;
+    }
+    setResetting(true);
+    try {
+      await requestResetCode(cfg.url, cfg.anonKey, resetEmail);
+      setResetStep("code");
+      setResetMsg("If that email has an account, the code is on its way.");
+    } finally {
+      setResetting(false);
+    }
+  }
+
+  // Step 2 spends the pushed code for the new password.
+  async function onConfirmReset() {
+    setResetMsg(null);
+    if (resetPw !== resetConfirm) {
+      setResetMsg("Passwords don't match.");
+      return;
+    }
+    const cfg = getBackendConfigSync();
+    if (!cfg) {
+      setResetMsg("Connect your backend first.");
+      return;
+    }
+    setResetting(true);
+    try {
+      await confirmResetCode(cfg.url, cfg.anonKey, resetEmail, resetCode, resetPw);
+      setResetMsg("Password updated, log in with it.");
+      setResetStep("email");
+      setResetCode("");
+      setResetPw("");
+      setResetConfirm("");
+    } catch (e) {
+      setResetMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -113,6 +173,71 @@ export default function Login() {
       <ErrorBanner message={error} />
       <PrimaryButton title="Log in" onPress={onLogin} loading={authLoading} />
 
+      {!needsBackend && (
+        <Pressable onPress={() => setShowReset((s) => !s)} hitSlop={8}>
+          <Text style={styles.forgot}>Forgot password?</Text>
+        </Pressable>
+      )}
+      {showReset && !needsBackend && (
+        <>
+          <Field
+            label="Account email"
+            icon="mail"
+            fieldKey="reset-email"
+            value={resetEmail}
+            onChangeText={setResetEmail}
+            keyboardType="email-address"
+            autoComplete="email"
+            textContentType="emailAddress"
+            returnKeyType="done"
+            onSubmitEditing={
+              resetStep === "email" ? onReset : onConfirmReset
+            }
+          />
+          {resetStep === "code" && (
+            <>
+              <Field
+                label="Reset code"
+                icon="key"
+                fieldKey="reset-code"
+                value={resetCode}
+                onChangeText={setResetCode}
+                keyboardType="number-pad"
+                maxLength={6}
+              />
+              <Field
+                label="New password"
+                icon="lock-closed"
+                fieldKey="reset-password"
+                value={resetPw}
+                onChangeText={setResetPw}
+                secureTextEntry
+                autoComplete="password"
+                textContentType="newPassword"
+              />
+              <Field
+                label="Confirm new password"
+                icon="checkmark-circle"
+                fieldKey="reset-confirm"
+                value={resetConfirm}
+                onChangeText={setResetConfirm}
+                secureTextEntry
+                autoComplete="password"
+                textContentType="newPassword"
+                returnKeyType="done"
+                onSubmitEditing={onConfirmReset}
+              />
+            </>
+          )}
+          {resetMsg ? <Text style={styles.resetMsg}>{resetMsg}</Text> : null}
+          <PrimaryButton
+            title={resetStep === "email" ? "Send reset code" : "Reset password"}
+            onPress={resetStep === "email" ? onReset : onConfirmReset}
+            loading={resetting}
+          />
+        </>
+      )}
+
       <View style={styles.footer}>
         <Text style={styles.footerText}>New here? </Text>
         <Link href="/register" style={styles.link}>
@@ -127,4 +252,11 @@ const styles = StyleSheet.create({
   footer: { flexDirection: "row", justifyContent: "center", marginTop: 2 },
   footerText: { color: Colors.muted, fontSize: 14 },
   link: { color: Colors.primary, fontSize: 14, fontWeight: "700" },
+  forgot: {
+    color: Colors.subtext0,
+    fontSize: 14,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  resetMsg: { color: Colors.success, fontSize: 13, textAlign: "center" },
 });

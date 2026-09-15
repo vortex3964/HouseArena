@@ -9,7 +9,8 @@ import {
 } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { connectBackend, restoreBackend } from "./supabase";
+import { connectBackend, restoreBackend, withTimeout } from "./supabase";
+import { registerPushToken } from "./push";
 import {
   createHousehold,
   fetchMyHouseholds,
@@ -42,6 +43,9 @@ type AuthContextValue = {
   skipHouseholdSetup: () => void;
   // Last data load failure, so empty lists are not mistaken for no data.
   dataError: string | null;
+  // Last boot failure, rendered with a retry button instead of a spinner.
+  bootError: string | null;
+  retryBoot: () => void;
   configureBackend: (url: string, anonKey: string) => Promise<void>;
   signIn: (username: string, password: string) => Promise<void>;
   signUp: (
@@ -70,6 +74,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [dataLoading, setDataLoading] = useState(false);
   const [setupSkipped, setSetupSkipped] = useState(false);
   const [dataError, setDataError] = useState<string | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [bootNonce, setBootNonce] = useState(0);
 
   // Loads profile plus household list after login, signup, or app start.
   // Fetch failures are recorded instead of looking like empty data.
@@ -80,8 +86,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setDataError(null);
       try {
         const [pRes, hRes] = await Promise.allSettled([
-          fetchMyProfile(c, userId),
-          fetchMyHouseholds(c, userId),
+          withTimeout(fetchMyProfile(c, userId), 15000, "Profile load"),
+          withTimeout(fetchMyHouseholds(c, userId), 15000, "Households load"),
         ]);
         const p = pRes.status === "fulfilled" ? pRes.value : null;
         const homes = hRes.status === "fulfilled" ? hRes.value : [];
@@ -101,6 +107,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setHouseholds(homes);
         queryClient.setQueryData(qk.myProfile(userId), p);
         queryClient.setQueryData(qk.myHouseholds(userId), homes);
+        // Device token for push, best effort, never blocks the session.
+        registerPushToken(c, userId);
       // Keep the remembered household when still a member of it,
       // otherwise fall back to the first one.
       const saved = await AsyncStorage.getItem(ACTIVE_KEY).catch(() => null);
@@ -122,20 +130,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  // Restore saved backend plus session on boot.
+  // Restore saved backend plus session on boot. Any stall becomes
+  // a retryable error, never an infinite spinner.
   useEffect(() => {
     let alive = true;
     (async () => {
+      setInitLoading(true);
+      setBootError(null);
       try {
-        const c = await restoreBackend();
+        const c = await withTimeout(
+          restoreBackend(),
+          25000,
+          "Backend restore",
+        );
         if (!alive) return;
         setClient(c);
         if (c) {
-          const { data } = await c.auth.getSession();
+          const { data } = await withTimeout(
+            c.auth.getSession(),
+            12000,
+            "Session restore",
+          );
           const uid = data.session?.user?.id ?? null;
           setSessionUserId(uid);
           if (uid) await loadSessionData(c, uid);
         }
+      } catch (e) {
+        if (alive)
+          setBootError(e instanceof Error ? e.message : String(e));
       } finally {
         if (alive) setInitLoading(false);
       }
@@ -143,7 +165,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       alive = false;
     };
-  }, [loadSessionData]);
+  }, [loadSessionData, bootNonce]);
+
+  const retryBoot = useCallback(() => {
+    setBootNonce((n) => n + 1);
+  }, []);
 
   // Keep session and data in sync. Boot owns the initial load and
   // token refreshes need none, so both events are skipped here.
@@ -369,6 +395,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setupSkipped,
       skipHouseholdSetup,
       dataError,
+      bootError,
+      retryBoot,
       configureBackend,
       signIn,
       signUp,
@@ -391,6 +419,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setupSkipped,
       skipHouseholdSetup,
       dataError,
+      bootError,
+      retryBoot,
       configureBackend,
       signIn,
       signUp,

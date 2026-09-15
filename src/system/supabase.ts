@@ -25,29 +25,97 @@ export type BackendConfig = { url: string; anonKey: string };
 let _client: SupabaseClient | null = null;
 let _config: BackendConfig | null = null;
 
+// Rejects when the wrapped work hangs, so a stalled store or network
+// surfaces as an error instead of an infinite spinner.
+export function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out - check connection and retry.`)),
+      ms,
+    );
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+// Web storage with an in-memory fallback. Some browsers block or break
+// localStorage (private mode, disabled site data, full quota), and one
+// broken read there kills the whole boot sequence. The fallback keeps
+// the app usable for the tab lifetime instead of dead on arrival.
+const memoryFallback = new Map<string, string>();
+const webStore = {
+  async getItem(key: string): Promise<string | null> {
+    try {
+      return await AsyncStorage.getItem(key);
+    } catch {
+      return memoryFallback.get(key) ?? null;
+    }
+  },
+  async setItem(key: string, value: string): Promise<void> {
+    try {
+      await AsyncStorage.setItem(key, value);
+    } catch {
+      memoryFallback.set(key, value);
+    }
+  },
+  async removeItem(key: string): Promise<void> {
+    try {
+      await AsyncStorage.removeItem(key);
+    } catch {
+      memoryFallback.delete(key);
+    }
+  },
+};
+
 // Storage helpers, SecureStore on native and AsyncStorage on web.
+// Native calls carry a timeout because a wedged keystore must fail
+// visibly, never hang the boot sequence.
 
 async function storeSet(key: string, value: string): Promise<void> {
   if (Platform.OS === "web") {
-    await AsyncStorage.setItem(key, value);
+    await webStore.setItem(key, value);
     return;
   }
-  await SecureStore.setItemAsync(key, value);
+  await withTimeout(
+    SecureStore.setItemAsync(key, value),
+    8000,
+    "Secure storage write",
+  );
 }
 
 async function storeGet(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
-    return AsyncStorage.getItem(key);
+    return webStore.getItem(key);
   }
-  return SecureStore.getItemAsync(key);
+  return withTimeout(
+    SecureStore.getItemAsync(key),
+    8000,
+    "Secure storage read",
+  );
 }
 
 async function storeDel(key: string): Promise<void> {
   if (Platform.OS === "web") {
-    await AsyncStorage.removeItem(key);
+    await webStore.removeItem(key);
     return;
   }
-  await SecureStore.deleteItemAsync(key);
+  await withTimeout(
+    SecureStore.deleteItemAsync(key),
+    8000,
+    "Secure storage delete",
+  );
 }
 
 // Auth session storage. Supabase tokens live here, so on native they go
@@ -95,11 +163,15 @@ async function secureAuthDel(key: string): Promise<void> {
 
 const authStorage =
   Platform.OS === "web"
-    ? AsyncStorage
+    ? webStore
     : {
-        getItem: secureAuthGet,
-        setItem: secureAuthSet,
-        removeItem: secureAuthDel,
+        // Generous budget: a session read spans several chunked calls.
+        getItem: (k: string) =>
+          withTimeout(secureAuthGet(k), 15000, "Session read"),
+        setItem: (k: string, v: string) =>
+          withTimeout(secureAuthSet(k, v), 15000, "Session write"),
+        removeItem: (k: string) =>
+          withTimeout(secureAuthDel(k), 15000, "Session delete"),
       };
 
 // Config helpers.
@@ -206,7 +278,12 @@ export async function restoreBackend(): Promise<SupabaseClient | null> {
   const envKey = DEV ? process.env.EXPO_PUBLIC_SUPABASE_KEY : undefined;
   const effective = cfg ?? (envUrl && envKey ? { url: envUrl, anonKey: envKey } : null);
   if (!effective) return null;
-  return initSupabaseClient(effective);
+  if (!cfg) {
+    // First run from build values: persist them so storage, the client,
+    // and Settings all agree from here on. Never breaks boot on failure.
+    await saveBackendConfig(effective.url, effective.anonKey).catch(() => {});
+  }
+  return initSupabaseClient(_config ?? effective);
 }
 
 export function getSupabase(): SupabaseClient | null {
@@ -242,8 +319,8 @@ export function validatePassword(password: string): string | null {
   return null;
 }
 
-// Format check only. Users must enter a real email, Supabase sends a
-// confirmation link to it before the first login.
+// Format check only. Users must enter a real email, it identifies
+// the account for login and password reset.
 export function validateEmail(email: string): string | null {
   const clean = email.trim();
   if (!clean) return "Type your email.";
@@ -259,6 +336,8 @@ export function friendlyAuthError(e: unknown): string {
     return "No account matches that username + password.";
   if (/user already registered|already exists/i.test(msg))
     return "That username is taken - try logging in.";
+  if (/email not confirmed/i.test(msg))
+    return "This email was registered while confirmation was on. Confirm it from the old mail, or delete the user in the dashboard and register again.";
   if (/fetch|network|failed/i.test(msg))
     return "Can't reach Supabase - check the URL/key and connection.";
   return msg;
