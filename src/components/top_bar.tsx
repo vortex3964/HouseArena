@@ -1,5 +1,5 @@
 import { Pressable, Text, View, StyleSheet } from "react-native";
-import { EdgeInsets, useSafeAreaInsets } from "react-native-safe-area-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DrawerToggleButton } from "expo-router/drawer";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
@@ -9,7 +9,7 @@ const MOCK_POINTS: Number = 6000;
 const MOCK_GEMS: Number = 32;
 
 export function TopBar() {
-  const insets : EdgeInsets = useSafeAreaInsets();
+  const insets = useSafeAreaInsets();
 
   return (
     <View style={[styles.bar, { paddingTop: insets.top }]}>
