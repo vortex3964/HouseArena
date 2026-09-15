@@ -482,3 +482,297 @@ DO $$ BEGIN
     using ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1] );
   END IF;
 END $$;
+
+-- SECURITY HARDENING
+-- Replaces a few policies with stricter versions and locks down functions.
+-- Only policies are dropped and recreated, never tables or data.
+
+-- Membership joins go through the invite-code RPC only. Direct inserts
+-- can no longer pick their own role, which closed an owner escalation.
+DROP POLICY IF EXISTS "Users can join as themselves" ON household_members;
+CREATE POLICY "No direct joins, RPC only"
+ON household_members FOR INSERT TO authenticated WITH CHECK (false);
+
+-- Profiles are readable by self or housemates only, not every login.
+DROP POLICY IF EXISTS "Profiles are viewable by authenticated users" ON profiles;
+CREATE POLICY "Profiles viewable by self or housemates"
+ON profiles FOR SELECT TO authenticated USING (
+  auth.uid() = id OR EXISTS (
+    SELECT 1 FROM household_members m1
+    JOIN household_members m2 ON m1.household_id = m2.household_id
+    WHERE m1.profile_id = auth.uid() AND m2.profile_id = profiles.id
+  )
+);
+
+-- Members can add fresh free tasks, but cannot pre-assign owners.
+DROP POLICY IF EXISTS "Members can create tasks" ON tasks;
+CREATE POLICY "Members can add free tasks"
+ON tasks FOR INSERT TO authenticated WITH CHECK (
+  is_household_member(household_id) AND status = 'free' AND owner IS NULL
+);
+
+-- Task status changes go through the claim and complete RPCs only.
+DROP POLICY IF EXISTS "Members can update tasks" ON tasks;
+CREATE POLICY "No direct task updates, RPC only"
+ON tasks FOR UPDATE TO authenticated USING (false);
+
+-- Points, gems, strikes and wins change through app actions only.
+-- Direct writes from logged-in users are rejected, RPCs still work
+-- because they run as definer instead of the authenticated role.
+CREATE OR REPLACE FUNCTION block_currency_selfwrite()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF current_user = 'authenticated' AND (
+    NEW.points IS DISTINCT FROM OLD.points OR
+    NEW.gems IS DISTINCT FROM OLD.gems OR
+    NEW.strikes IS DISTINCT FROM OLD.strikes OR
+    NEW.wins IS DISTINCT FROM OLD.wins
+  ) THEN
+    RAISE EXCEPTION 'points, gems, strikes and wins change through app actions only'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = public;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_currency_selfwrite') THEN
+    CREATE TRIGGER trg_block_currency_selfwrite
+    BEFORE UPDATE OF points, gems, strikes, wins ON profiles
+    FOR EACH ROW EXECUTE FUNCTION block_currency_selfwrite();
+  END IF;
+END $$;
+
+-- Only owners can remove other owners. Admins can still remove members,
+-- and anyone can always remove themselves by leaving.
+CREATE OR REPLACE FUNCTION guard_owner_removal()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF current_user = 'authenticated'
+    AND OLD.role = 'owner'
+    AND OLD.profile_id != auth.uid()
+  THEN
+    RAISE EXCEPTION 'only the owner can remove themselves'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql SET search_path = public;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_guard_owner_removal') THEN
+    CREATE TRIGGER trg_guard_owner_removal
+    BEFORE DELETE ON household_members
+    FOR EACH ROW EXECUTE FUNCTION guard_owner_removal();
+  END IF;
+END $$;
+
+-- Remember who created each task, defaults to the caller.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES profiles(id) ON DELETE SET NULL;
+ALTER TABLE tasks ALTER COLUMN created_by SET DEFAULT auth.uid();
+
+-- Leaving checks membership first. When the last owner leaves while
+-- members remain, the earliest member is promoted so nobody is orphaned.
+CREATE OR REPLACE FUNCTION leave_household(p_household_id INTEGER)
+RETURNS void AS $$
+BEGIN
+  IF NOT is_household_member(p_household_id) THEN
+    RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
+  END IF;
+  DELETE FROM public.household_members
+  WHERE household_id = p_household_id AND profile_id = auth.uid();
+  IF NOT EXISTS (
+    SELECT 1 FROM public.household_members
+    WHERE household_id = p_household_id AND role = 'owner'
+  ) AND EXISTS (
+    SELECT 1 FROM public.household_members WHERE household_id = p_household_id
+  ) THEN
+    UPDATE public.household_members SET role = 'owner'
+    WHERE household_id = p_household_id AND (profile_id, joined_at) = (
+      SELECT profile_id, joined_at FROM public.household_members
+      WHERE household_id = p_household_id ORDER BY joined_at LIMIT 1
+    );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.household_members WHERE household_id = p_household_id
+  ) THEN
+    DELETE FROM public.households WHERE id = p_household_id;
+  END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Completing needs membership too. Anyone who took a task can finish it.
+CREATE OR REPLACE FUNCTION complete_task(p_task_id INTEGER)
+RETURNS tasks AS $$
+DECLARE
+    target tasks;
+    completed tasks;
+    uid UUID := auth.uid();
+BEGIN
+    IF uid IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated' USING ERRCODE = 'P0001';
+    END IF;
+    SELECT * INTO target FROM public.tasks WHERE id = p_task_id;
+    IF target IS NULL THEN
+        RAISE EXCEPTION 'Task % does not exist', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    IF NOT is_household_member(target.household_id) THEN
+        RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
+    END IF;
+    IF target.owner IS DISTINCT FROM uid OR target.status != 'taken' THEN
+        RAISE EXCEPTION 'Task % cannot be completed by this user (not owned or not taken)', p_task_id
+            USING ERRCODE = 'P0001';
+    END IF;
+    UPDATE public.tasks
+    SET status = 'completed'
+    WHERE id = p_task_id AND owner = uid AND status = 'taken'
+    RETURNING * INTO completed;
+    IF completed IS NULL THEN
+        RAISE EXCEPTION 'Task % was taken by someone else first', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    UPDATE public.profiles
+    SET points = points + completed.points
+    WHERE id = uid;
+    RETURN completed;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Stronger invite codes, 12 chars from a CSPRNG instead of 6 hex chars.
+ALTER TABLE households ALTER COLUMN invite_code
+  SET DEFAULT upper(substr(encode(gen_random_bytes(9), 'hex'), 1, 12));
+
+-- Household creation retries the code on the rare collision.
+CREATE OR REPLACE FUNCTION create_household(p_name TEXT)
+RETURNS households AS $$
+DECLARE
+    home households;
+    clean TEXT;
+    attempt INTEGER;
+BEGIN
+    clean := trim(p_name);
+    IF clean IS NULL OR length(clean) < 2 THEN
+        RAISE EXCEPTION 'Household name is too short' USING ERRCODE = 'P0001';
+    END IF;
+    IF length(clean) > 50 THEN
+        RAISE EXCEPTION 'Household name max 50 characters' USING ERRCODE = 'P0001';
+    END IF;
+    FOR attempt IN 1..5 LOOP
+        BEGIN
+            INSERT INTO public.households (name, created_by)
+            VALUES (clean, auth.uid())
+            RETURNING * INTO home;
+            EXIT;
+        EXCEPTION WHEN unique_violation THEN
+            IF attempt = 5 THEN RAISE; END IF;
+        END;
+    END LOOP;
+    INSERT INTO public.household_members (household_id, profile_id, role)
+    VALUES (home.id, auth.uid(), 'owner')
+    ON CONFLICT DO NOTHING;
+    RETURN home;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Logs are written through this RPC so the owner name comes from
+-- the caller account and cannot be forged by other members.
+CREATE OR REPLACE FUNCTION log_activity(p_household_id INTEGER, p_details TEXT)
+RETURNS activity_logs AS $$
+DECLARE
+    entry activity_logs;
+BEGIN
+    IF NOT is_household_member(p_household_id) THEN
+        RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
+    END IF;
+    INSERT INTO public.activity_logs (household_id, owner, details)
+    VALUES (
+      p_household_id,
+      (SELECT username FROM public.profiles WHERE id = auth.uid()),
+      substr(trim(p_details), 1, 500)
+    )
+    RETURNING * INTO entry;
+    RETURN entry;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+DROP POLICY IF EXISTS "Members can write logs" ON activity_logs;
+CREATE POLICY "No direct log writes, RPC only"
+ON activity_logs FOR INSERT TO authenticated WITH CHECK (false);
+
+-- Avatars are viewable by self or housemates, writes stay own-folder.
+DROP POLICY IF EXISTS "Avatars are viewable by authenticated users" ON storage.objects;
+CREATE POLICY "Avatars viewable by self or housemates"
+ON storage.objects FOR SELECT TO authenticated USING (
+  bucket_id = 'avatars' AND (
+    auth.uid()::text = (storage.foldername(name))[1] OR EXISTS (
+      SELECT 1 FROM household_members m1
+      JOIN household_members m2 ON m1.household_id = m2.household_id
+      WHERE m1.profile_id = auth.uid()
+        AND m2.profile_id::text = (storage.foldername(name))[1]
+    )
+  )
+);
+
+DROP POLICY IF EXISTS "Users can update their own avatar" ON storage.objects;
+CREATE POLICY "Users can update their own avatar"
+ON storage.objects FOR UPDATE TO authenticated
+USING ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1] )
+WITH CHECK ( bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1] );
+
+-- Lock down function execution. Helpers stay usable where RLS needs them.
+-- Email lookup keeps anon because username login happens before sign-in.
+REVOKE ALL ON FUNCTION decay_strikes() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION prune_activity_logs() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION apply_strike_penalty() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION set_household_check_date() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION handle_new_user() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION block_currency_selfwrite() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION guard_owner_removal() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION is_household_member(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION is_household_admin(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION create_household(TEXT) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION join_household_by_code(TEXT) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION leave_household(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION claim_task(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION complete_task(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION get_household_logs(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION log_activity(INTEGER, TEXT) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION get_email_for_username(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION is_household_member(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION is_household_admin(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION create_household(TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION join_household_by_code(TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION leave_household(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION claim_task(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION complete_task(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION get_household_logs(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION log_activity(INTEGER, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION get_email_for_username(TEXT) TO anon, authenticated;
+
+-- v2.2. When a member leaves or is removed, their taken tasks go back
+-- to free so anyone else can take them. Completed work is untouched.
+CREATE OR REPLACE FUNCTION release_tasks_on_leave()
+RETURNS TRIGGER AS $$
+BEGIN
+  UPDATE public.tasks SET status = 'free', owner = NULL
+  WHERE household_id = OLD.household_id
+    AND owner = OLD.profile_id
+    AND status = 'taken';
+  INSERT INTO public.activity_logs (household_id, owner, details)
+  VALUES (
+    OLD.household_id,
+    (SELECT username FROM public.profiles WHERE id = OLD.profile_id),
+    'left the household, their taken tasks are free again'
+  );
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_release_tasks_on_leave') THEN
+    CREATE TRIGGER trg_release_tasks_on_leave
+    BEFORE DELETE ON household_members
+    FOR EACH ROW EXECUTE FUNCTION release_tasks_on_leave();
+  END IF;
+END $$;
+
+REVOKE ALL ON FUNCTION release_tasks_on_leave() FROM PUBLIC, anon, authenticated;

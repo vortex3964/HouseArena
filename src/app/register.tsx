@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { useRef, useState } from "react";
+import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Link, router } from "expo-router";
 import { useAuth } from "../system/AuthProvider";
 import { getDevPrefill, isBackendDownError } from "../system/supabase";
@@ -42,6 +42,9 @@ export default function Register() {
   const [householdName, setHouseholdName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const usernameRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput>(null);
+  const confirmRef = useRef<TextInput>(null);
 
   // Fresh install shows the code fields, working devices hide them.
   const needsBackend = !backendReady || showBackend;
@@ -111,27 +114,29 @@ export default function Register() {
         <Field
           label="New household name"
           icon="home"
+          fieldKey="household-name"
           value={householdName}
           onChangeText={setHouseholdName}
           maxLength={50}
+          returnKeyType="done"
+          onSubmitEditing={onCreateHousehold}
         />
         <PrimaryButton
           title="Create household"
           onPress={onCreateHousehold}
           loading={authLoading}
         />
-        <View style={styles.divider}>
-          <View style={styles.line} />
-          <Text style={styles.dividerText}>or</Text>
-          <View style={styles.line} />
-        </View>
         <Field
           label="Invite code"
           icon="ticket"
+          fieldKey="invite-code"
           value={inviteCode}
           onChangeText={(v) => setInviteCode(v.toUpperCase())}
           autoCapitalize="characters"
+          autoCorrect={false}
           maxLength={12}
+          returnKeyType="done"
+          onSubmitEditing={onJoinHousehold}
         />
         <PrimaryButton
           title="Join with code"
@@ -167,30 +172,55 @@ export default function Register() {
       <Field
         label="Email"
         icon="mail"
+        fieldKey="email"
         value={email}
         onChangeText={setEmail}
         keyboardType="email-address"
+        autoComplete="email"
+        textContentType="emailAddress"
+        returnKeyType="next"
+        onSubmitEditing={() => usernameRef.current?.focus()}
+        blurOnSubmit={false}
       />
       <Field
         label="Username"
         icon="person"
+        fieldKey="username"
+        ref={usernameRef}
         value={username}
         onChangeText={setUsername}
         maxLength={20}
+        autoComplete="username"
+        textContentType="username"
+        returnKeyType="next"
+        onSubmitEditing={() => passwordRef.current?.focus()}
+        blurOnSubmit={false}
       />
       <Field
         label="Password"
         icon="lock-closed"
+        fieldKey="password"
+        ref={passwordRef}
         value={password}
         onChangeText={setPassword}
         secureTextEntry
+        autoComplete="password"
+        textContentType="newPassword"
+        returnKeyType="next"
+        onSubmitEditing={() => confirmRef.current?.focus()}
+        blurOnSubmit={false}
       />
       <Field
         label="Confirm password"
         icon="checkmark-circle"
+        fieldKey="confirm"
+        ref={confirmRef}
         value={confirm}
         onChangeText={setConfirm}
         secureTextEntry
+        autoComplete="password"
+        textContentType="newPassword"
+        returnKeyType="done"
         onSubmitEditing={onCreateAccount}
       />
 
@@ -215,9 +245,6 @@ const styles = StyleSheet.create({
   footer: { flexDirection: "row", justifyContent: "center", marginTop: 2 },
   footerText: { color: Colors.muted, fontSize: 14 },
   link: { color: Colors.primary, fontSize: 14, fontWeight: "700" },
-  divider: { flexDirection: "row", alignItems: "center", gap: 10 },
-  line: { flex: 1, height: 1, backgroundColor: Colors.border },
-  dividerText: { color: Colors.muted, fontSize: 12, fontWeight: "600" },
   skip: {
     color: Colors.subtext0,
     fontSize: 14,

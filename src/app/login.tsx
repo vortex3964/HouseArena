@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { useRef, useState } from "react";
+import { StyleSheet, Text, TextInput, View } from "react-native";
 import { Link, router } from "expo-router";
 import { useAuth } from "../system/AuthProvider";
 import { getDevPrefill, isBackendDownError } from "../system/supabase";
@@ -14,13 +14,14 @@ import {
 } from "../components/auth_ui";
 
 // Dev prefill so you do not retype the URL and key while coding.
-// Real users never see .env, they type or scan codes inside the app.
+// Real users never see .env, they type the codes inside the app.
 const prefill = getDevPrefill();
 
 export default function Login() {
   const { backendReady, authLoading, signIn, configureBackend } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const passwordRef = useRef<TextInput>(null);
 
   // Backend form state. Hidden most of the time on purpose.
   const [url, setUrl] = useState(prefill?.url ?? "");
@@ -86,15 +87,26 @@ export default function Login() {
       <Field
         label="Username"
         icon="person"
+        fieldKey="username"
         value={username}
         onChangeText={setUsername}
+        autoComplete="username"
+        textContentType="username"
+        returnKeyType="next"
+        onSubmitEditing={() => passwordRef.current?.focus()}
+        blurOnSubmit={false}
       />
       <Field
         label="Password"
         icon="lock-closed"
+        fieldKey="password"
+        ref={passwordRef}
         value={password}
         onChangeText={setPassword}
         secureTextEntry
+        autoComplete="password"
+        textContentType="password"
+        returnKeyType="done"
         onSubmitEditing={onLogin}
       />
 

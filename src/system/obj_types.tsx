@@ -26,6 +26,7 @@ export type Task = {
   status: TaskStatus;
   household_id: number;
   owner: string | null;
+  created_by: string | null;
   created_at: string;
 };
 

@@ -5,7 +5,14 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { Drawer, DrawerToggleButton } from "expo-router/drawer";
+import {
+  Drawer,
+  DrawerContentScrollView,
+  DrawerItem,
+  DrawerItemList,
+  DrawerToggleButton,
+  type DrawerContentComponentProps,
+} from "expo-router/drawer";
 import { router, useSegments } from "expo-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import Ionicons from "@expo/vector-icons/Ionicons";
@@ -24,6 +31,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     dataLoading,
     households,
     setupSkipped,
+    dataError,
   } = useAuth();
   const segments = useSegments();
   const current = segments[segments.length - 1] as string | undefined;
@@ -32,13 +40,18 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     if (initLoading || dataLoading) return;
     const onAuthRoute = current && AUTH_ROUTES.includes(current);
     const onSetupRoute = current === SETUP_ROUTE;
-    if (!sessionUserId && !onAuthRoute) router.replace("/login");
+    // Email confirmation landing, part of the login flow itself.
+    const onCallbackRoute = segments[0] === "auth";
+    if (!sessionUserId && !onAuthRoute && !onCallbackRoute)
+      router.replace("/login");
     else if (sessionUserId && onAuthRoute) router.replace("/");
     // Logged in but homeless: force setup unless skipped this login.
+    // Skipped when data failed to load, empty then means unknown.
     else if (
       sessionUserId &&
       households.length === 0 &&
       !setupSkipped &&
+      !dataError &&
       !onSetupRoute &&
       !onAuthRoute
     )
@@ -50,9 +63,10 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       onSetupRoute
     )
       router.replace("/");
-  }, [sessionUserId, initLoading, dataLoading, households, setupSkipped, current]);
+  }, [sessionUserId, initLoading, dataLoading, households, setupSkipped, dataError, current]);
 
-  if (initLoading) {
+  // Wait for session data too, so protected screens never paint homeless.
+  if (initLoading || (sessionUserId && dataLoading)) {
     return (
       <View
         style={{
@@ -77,6 +91,7 @@ function AppDrawer() {
       style={{ flex: 1, backgroundColor: Colors.bgDeep }}
     >
       <Drawer
+        drawerContent={(props) => <CustomDrawerContent {...props} />}
         screenOptions={{
           header: () => <TopBar />,
 
@@ -199,8 +214,88 @@ function AppDrawer() {
             swipeEnabled: false,
           }}
         />
+        {/* Hidden screens, reached via buttons not the list */}
+        <Drawer.Screen
+          name="settings"
+          options={{
+            drawerItemStyle: { display: "none" },
+            title: "Settings",
+          }}
+        />
+        <Drawer.Screen
+          name="auth/callback"
+          options={{
+            drawerItemStyle: { display: "none" },
+            headerShown: false,
+            swipeEnabled: false,
+          }}
+        />
       </Drawer>
     </GestureHandlerRootView>
+  );
+}
+
+// Drawer list plus pinned Logout and Settings buttons at the bottom.
+function CustomDrawerContent(props: DrawerContentComponentProps) {
+  const { signOut } = useAuth();
+  const active = props.state.routeNames[props.state.index];
+
+  async function onLogout() {
+    props.navigation.closeDrawer();
+    await signOut();
+    router.replace("/login");
+  }
+
+  return (
+    <View style={{ flex: 1, backgroundColor: Colors.mantle }}>
+      <DrawerContentScrollView
+        {...props}
+        contentContainerStyle={{
+          backgroundColor: Colors.mantle,
+          paddingTop: 12,
+          paddingHorizontal: 8,
+        }}
+      >
+        <DrawerItemList {...props} />
+      </DrawerContentScrollView>
+      <View
+        style={{
+          paddingHorizontal: 8,
+          paddingBottom: 20,
+          borderTopWidth: 1,
+          borderTopColor: Colors.border,
+          paddingTop: 8,
+        }}
+      >
+        <DrawerItem
+          label="Log out"
+          activeTintColor={Colors.danger}
+          inactiveTintColor={Colors.danger}
+          labelStyle={{ fontSize: 15, fontWeight: "600", marginLeft: -4 }}
+          style={{ borderRadius: 14, paddingHorizontal: 4 }}
+          icon={({ color, size }) => (
+            <Ionicons name="log-out" size={size} color={color} />
+          )}
+          onPress={onLogout}
+        />
+        <DrawerItem
+          label="Settings"
+          focused={active === "settings"}
+          activeTintColor={Colors.primary}
+          inactiveTintColor={Colors.subtext0}
+          activeBackgroundColor={Colors.primarySoft}
+          labelStyle={{ fontSize: 15, fontWeight: "600", marginLeft: -4 }}
+          style={{ borderRadius: 14, paddingHorizontal: 4 }}
+          icon={({ color, size }) => (
+            <Ionicons name="settings" size={size} color={color} />
+          )}
+          onPress={() => {
+            props.navigation.closeDrawer();
+            router.push("/settings");
+          }}
+        />
+      </View>
+    </View>
   );
 }
 

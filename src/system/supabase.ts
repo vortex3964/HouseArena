@@ -12,8 +12,13 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 
-const URL_KEY = "housearena.supabase.url";
-const ANON_KEY = "housearena.supabase.anon_key";
+const CONFIG_KEY = "housearena.supabase.config";
+// Keys used by earlier builds, migrated to CONFIG_KEY automatically.
+const LEGACY_URL_KEY = "housearena.supabase.url";
+const LEGACY_ANON_KEY = "housearena.supabase.anon_key";
+
+// __DEV__ is true for dev builds only, never for store builds.
+const DEV = typeof __DEV__ !== "undefined" ? __DEV__ : false;
 
 export type BackendConfig = { url: string; anonKey: string };
 
@@ -34,12 +39,7 @@ async function storeGet(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
     return AsyncStorage.getItem(key);
   }
-  try {
-    return await SecureStore.getItemAsync(key);
-  } catch {
-    // Fallback if SecureStore unavailable (e.g. some emulators)
-    return AsyncStorage.getItem(key);
-  }
+  return SecureStore.getItemAsync(key);
 }
 
 async function storeDel(key: string): Promise<void> {
@@ -47,12 +47,60 @@ async function storeDel(key: string): Promise<void> {
     await AsyncStorage.removeItem(key);
     return;
   }
-  try {
-    await SecureStore.deleteItemAsync(key);
-  } catch {
-    await AsyncStorage.removeItem(key);
+  await SecureStore.deleteItemAsync(key);
+}
+
+// Auth session storage. Supabase tokens live here, so on native they go
+// to SecureStore in chunks (values have a ~2KB limit per item).
+const CHUNK_SIZE = 1800;
+const chunkKey = (key: string, i: number) => `${key}.${i}`;
+
+async function secureAuthGet(key: string): Promise<string | null> {
+  const count = Number(await SecureStore.getItemAsync(chunkKey(key, -1)));
+  if (!Number.isFinite(count) || count <= 0) return null;
+  let out = "";
+  for (let i = 0; i < count; i++) {
+    const part = await SecureStore.getItemAsync(chunkKey(key, i));
+    if (part == null) return null;
+    out += part;
+  }
+  return out;
+}
+
+async function secureAuthSet(key: string, value: string): Promise<void> {
+  const oldCount =
+    Number(await SecureStore.getItemAsync(chunkKey(key, -1))) || 0;
+  const chunks = Math.max(1, Math.ceil(value.length / CHUNK_SIZE));
+  for (let i = 0; i < chunks; i++) {
+    await SecureStore.setItemAsync(
+      chunkKey(key, i),
+      value.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
+    );
+  }
+  await SecureStore.setItemAsync(chunkKey(key, -1), String(chunks));
+  for (let i = chunks; i < oldCount; i++) {
+    await SecureStore.deleteItemAsync(chunkKey(key, i)).catch(() => {});
   }
 }
+
+async function secureAuthDel(key: string): Promise<void> {
+  const count =
+    Number(await SecureStore.getItemAsync(chunkKey(key, -1)).catch(() => null)) ||
+    0;
+  for (let i = 0; i < count; i++) {
+    await SecureStore.deleteItemAsync(chunkKey(key, i)).catch(() => {});
+  }
+  await SecureStore.deleteItemAsync(chunkKey(key, -1)).catch(() => {});
+}
+
+const authStorage =
+  Platform.OS === "web"
+    ? AsyncStorage
+    : {
+        getItem: secureAuthGet,
+        setItem: secureAuthSet,
+        removeItem: secureAuthDel,
+      };
 
 // Config helpers.
 
@@ -71,11 +119,30 @@ export function validateConfig(c: BackendConfig): string | null {
 }
 
 export async function loadBackendConfig(): Promise<BackendConfig | null> {
+  // Single atomic blob. One key means no half-saved URL-without-key state.
+  const raw = await storeGet(CONFIG_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as BackendConfig;
+      if (parsed.url && parsed.anonKey) return parsed;
+    } catch {
+      return null;
+    }
+  }
+  // One-time migration from the two-key format of earlier builds.
   const [url, anonKey] = await Promise.all([
-    storeGet(URL_KEY),
-    storeGet(ANON_KEY),
+    storeGet(LEGACY_URL_KEY),
+    storeGet(LEGACY_ANON_KEY),
   ]);
-  if (url && anonKey) return { url, anonKey };
+  if (url && anonKey) {
+    const cfg = { url, anonKey };
+    await storeSet(CONFIG_KEY, JSON.stringify(cfg));
+    await Promise.all([
+      storeDel(LEGACY_URL_KEY),
+      storeDel(LEGACY_ANON_KEY),
+    ]).catch(() => {});
+    return cfg;
+  }
   return null;
 }
 
@@ -86,16 +153,17 @@ export async function saveBackendConfig(
   const cfg = sanitizeConfig(url, anonKey);
   const err = validateConfig(cfg);
   if (err) throw new Error(err);
-  await Promise.all([
-    storeSet(URL_KEY, cfg.url),
-    storeSet(ANON_KEY, cfg.anonKey),
-  ]);
+  await storeSet(CONFIG_KEY, JSON.stringify(cfg));
   _config = cfg;
   return cfg;
 }
 
 export async function clearBackendConfig(): Promise<void> {
-  await Promise.all([storeDel(URL_KEY), storeDel(ANON_KEY)]);
+  await Promise.all([
+    storeDel(CONFIG_KEY),
+    storeDel(LEGACY_URL_KEY),
+    storeDel(LEGACY_ANON_KEY),
+  ]).catch(() => {});
   _config = null;
   _client = null;
 }
@@ -106,7 +174,7 @@ export function initSupabaseClient(cfg: BackendConfig): SupabaseClient {
   _config = cfg;
   _client = createClient(cfg.url, cfg.anonKey, {
     auth: {
-      storage: AsyncStorage,
+      storage: authStorage,
       autoRefreshToken: true,
       persistSession: true,
       detectSessionInUrl: false,
@@ -132,9 +200,10 @@ export async function connectBackend(
 export async function restoreBackend(): Promise<SupabaseClient | null> {
   if (_client) return _client;
   const cfg = _config ?? (await loadBackendConfig());
-  // Dev convenience: prefill from .env so you don't retype while coding.
-  const envUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
-  const envKey = process.env.EXPO_PUBLIC_SUPABASE_KEY;
+  // Dev builds only: prefill from .env so coding needs no retyping.
+  // Store builds never read .env, values there would ship in the bundle.
+  const envUrl = DEV ? process.env.EXPO_PUBLIC_SUPABASE_URL : undefined;
+  const envKey = DEV ? process.env.EXPO_PUBLIC_SUPABASE_KEY : undefined;
   const effective = cfg ?? (envUrl && envKey ? { url: envUrl, anonKey: envKey } : null);
   if (!effective) return null;
   return initSupabaseClient(effective);
@@ -148,8 +217,9 @@ export function getBackendConfigSync(): BackendConfig | null {
   return _config;
 }
 
-/** Dev-only prefill for the credentials inputs (from .env if present). */
+/** Dev-only prefill for the credentials inputs. Always null in store builds. */
 export function getDevPrefill(): BackendConfig | null {
+  if (!DEV) return null;
   const envUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
   const envKey = process.env.EXPO_PUBLIC_SUPABASE_KEY;
   if (envUrl && envKey) return { url: envUrl, anonKey: envKey };

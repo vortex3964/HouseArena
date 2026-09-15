@@ -1,0 +1,189 @@
+import { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+import Ionicons from "@expo/vector-icons/Ionicons";
+import * as Clipboard from "expo-clipboard";
+import { useAuth } from "../system/AuthProvider";
+import {
+  loadBackendConfig,
+  type BackendConfig,
+} from "../system/supabase";
+import { Colors } from "../global/theme";
+
+// Settings lives at the bottom of the drawer. It shows the saved backend
+// values and the active household invite code.
+export default function Settings() {
+  const { activeHousehold, households } = useAuth();
+  const [backend, setBackend] = useState<BackendConfig | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showKey, setShowKey] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  // Saved backend values, same ones typed during register.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const cfg = await loadBackendConfig().catch(() => null);
+      if (alive) {
+        setBackend(cfg);
+        setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function copy(label: string, text: string) {
+    await Clipboard.setStringAsync(text);
+    setCopied(label);
+  }
+
+  const maskedKey = backend
+    ? showKey
+      ? backend.anonKey
+      : backend.anonKey.slice(0, 8) + "..." + backend.anonKey.slice(-4)
+    : "";
+
+  return (
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+    >
+      <Text style={styles.title}>Settings</Text>
+
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <Ionicons name="server" size={18} color={Colors.secondary} />
+          <Text style={styles.cardTitle}>Backend connection</Text>
+        </View>
+        {loading ? (
+          <ActivityIndicator color={Colors.primary} />
+        ) : backend ? (
+          <>
+            <Text style={styles.label}>Supabase URL</Text>
+            <View style={styles.valueRow}>
+              <Text style={styles.value} numberOfLines={1}>
+                {backend.url}
+              </Text>
+              <Pressable onPress={() => copy("url", backend.url)} hitSlop={8}>
+                <Ionicons name="copy" size={18} color={Colors.muted} />
+              </Pressable>
+            </View>
+            <Text style={styles.label}>Anon key</Text>
+            <View style={styles.valueRow}>
+              <Text style={styles.value} numberOfLines={1}>
+                {maskedKey}
+              </Text>
+              <Pressable onPress={() => setShowKey((s) => !s)} hitSlop={8}>
+                <Ionicons
+                  name={showKey ? "eye-off" : "eye"}
+                  size={18}
+                  color={Colors.muted}
+                />
+              </Pressable>
+              <Pressable
+                onPress={() => copy("key", backend.anonKey)}
+                hitSlop={8}
+              >
+                <Ionicons name="copy" size={18} color={Colors.muted} />
+              </Pressable>
+            </View>
+            {copied && (
+              <Text style={styles.copied}>Copied {copied} to clipboard.</Text>
+            )}
+          </>
+        ) : (
+          <Text style={styles.hint}>No backend saved on this device yet.</Text>
+        )}
+      </View>
+
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <Ionicons name="ticket" size={18} color={Colors.secondary} />
+          <Text style={styles.cardTitle}>Invite members</Text>
+        </View>
+        {activeHousehold ? (
+          <>
+            <Text style={styles.hint}>
+              Members of {activeHousehold.household.name} join with this code.
+            </Text>
+            <Pressable
+              style={styles.codeRow}
+              onPress={() =>
+                copy("code", activeHousehold.household.invite_code)
+              }
+            >
+              <Text style={styles.code}>
+                {activeHousehold.household.invite_code}
+              </Text>
+              <Ionicons name="copy" size={20} color={Colors.primary} />
+            </Pressable>
+          </>
+        ) : (
+          <Text style={styles.hint}>
+            {households.length === 0
+              ? "Join or create a household first."
+              : "No active household selected."}
+          </Text>
+        )}
+      </View>
+
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: Colors.bgDeep },
+  content: { padding: 20, gap: 14, paddingBottom: 32 },
+  title: { color: Colors.text, fontSize: 26, fontWeight: "800" },
+  card: {
+    backgroundColor: Colors.card,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: 18,
+    padding: 16,
+    gap: 10,
+  },
+  row: { flexDirection: "row", alignItems: "center", gap: 8 },
+  cardTitle: { color: Colors.text, fontWeight: "700", fontSize: 16 },
+  label: { color: Colors.subtext1, fontSize: 13, fontWeight: "600" },
+  valueRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: Colors.bg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  value: { flex: 1, color: Colors.text, fontSize: 13 },
+  hint: { color: Colors.muted, fontSize: 13 },
+  copied: { color: Colors.success, fontSize: 13, fontWeight: "600" },
+  codeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: Colors.bg,
+    borderWidth: 1,
+    borderColor: Colors.borderStrong,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  code: {
+    color: Colors.text,
+    fontSize: 24,
+    fontWeight: "800",
+    letterSpacing: 4,
+  },
+});

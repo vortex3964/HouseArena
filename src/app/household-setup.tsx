@@ -56,23 +56,29 @@ export default function HouseholdSetup() {
       <Field
         label="New household name"
         icon="home"
+        fieldKey="household-name"
         value={householdName}
         onChangeText={setHouseholdName}
         maxLength={50}
+        returnKeyType="done"
+        onSubmitEditing={onCreate}
       />
       <PrimaryButton
         title="Create household"
         onPress={onCreate}
         loading={authLoading}
       />
-      <Text style={styles.dividerText}>or</Text>
       <Field
         label="Invite code"
         icon="ticket"
+        fieldKey="invite-code"
         value={inviteCode}
         onChangeText={(v) => setInviteCode(v.toUpperCase())}
         autoCapitalize="characters"
+        autoCorrect={false}
         maxLength={12}
+        returnKeyType="done"
+        onSubmitEditing={onJoin}
       />
       <PrimaryButton
         title="Join with code"
@@ -88,12 +94,6 @@ export default function HouseholdSetup() {
 }
 
 const styles = StyleSheet.create({
-  dividerText: {
-    color: Colors.muted,
-    fontSize: 12,
-    fontWeight: "600",
-    textAlign: "center",
-  },
   skip: {
     color: Colors.subtext0,
     fontSize: 14,

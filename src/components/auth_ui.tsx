@@ -1,5 +1,16 @@
-import { useState, type ReactNode } from "react";
 import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  findNodeHandle,
+  Image,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -7,12 +18,20 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  UIManager,
   View,
 } from "react-native";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
 
-// Screen shell - badge, title, and card wrapper shared by login/register.
+// Shared scroller so any Field can bring itself above the keyboard.
+type AuthScroll = {
+  getScrollHandle: () => number | null;
+  smoothScroll: (y: number) => void;
+};
+const AuthScrollCtx = createContext<AuthScroll | null>(null);
+
+// Screen shell
 
 export function AuthScreen({
   eyebrow,
@@ -25,49 +44,117 @@ export function AuthScreen({
   subtitle: string;
   children: ReactNode;
 }) {
+  const scrollRef = useRef<ScrollView>(null);
+  const [kbHeight, setKbHeight] = useState(0);
+
+  // Track keyboard height so the last fields can scroll above it.
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", (e) =>
+      setKbHeight(e.endCoordinates.height),
+    );
+    const hide = Keyboard.addListener("keyboardDidHide", () => setKbHeight(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+
+  const getScrollHandle = useCallback(
+    () =>
+      scrollRef.current ? findNodeHandle(scrollRef.current) : null,
+    [],
+  );
+  const smoothScroll = useCallback((y: number) => {
+    scrollRef.current?.scrollTo({ y, animated: true });
+  }, []);
+
   return (
     <KeyboardAvoidingView
       style={styles.screen}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      // iOS shifts the layout, Android resizes the window instead
+      // (see softwareKeyboardLayoutMode in app.json).
+      enabled={Platform.OS === "ios"}
+      behavior="padding"
+      keyboardVerticalOffset={0}
     >
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.badge}>
-          <Ionicons name="home" size={26} color={Colors.onPrimary} />
-        </View>
-        <Text style={styles.eyebrow}>{eyebrow}</Text>
-        <Text style={styles.title}>{title}</Text>
-        <Text style={styles.subtitle}>{subtitle}</Text>
-        <View style={styles.card}>{children}</View>
-      </ScrollView>
+      <AuthScrollCtx.Provider value={{ getScrollHandle, smoothScroll }}>
+        <ScrollView
+          ref={scrollRef}
+          contentContainerStyle={[
+            styles.scroll,
+            { paddingBottom: 24 + kbHeight },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <Image
+            source={require("../../assets/images/appImages/logo.png")}
+            style={styles.badge}
+          />
+          <Text style={styles.eyebrow}>{eyebrow}</Text>
+          <Text style={styles.title}>{title}</Text>
+          <Text style={styles.subtitle}>{subtitle}</Text>
+          <View style={styles.card}>{children}</View>
+        </ScrollView>
+      </AuthScrollCtx.Provider>
     </KeyboardAvoidingView>
   );
 }
 
-// Labeled input row with an icon, used for every text field.
+// Hook that scrolls a wrapped input above the keyboard on focus.
+// Returns a ref for the wrapper View plus an onFocus handler.
+export function useFieldScroller() {
+  const scroller = useContext(AuthScrollCtx);
+  const wrapRef = useRef<View>(null);
 
+  const onFocusInput = useCallback(() => {
+    const node = findNodeHandle(wrapRef.current);
+    const parent = scroller?.getScrollHandle();
+    if (node != null && parent != null) {
+      UIManager.measureLayout(node, parent, () => {}, (_x, y) =>
+        scroller?.smoothScroll(Math.max(0, y - 96)),
+      );
+    }
+  }, [scroller]);
+
+  return { wrapRef, onFocusInput };
+}
+
+// Labeled input row with an icon, used for every text field.
 export function Field({
   label,
   icon,
+  fieldKey,
+  onFocus,
+  ref,
   ...props
 }: {
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
+  fieldKey?: string;
+  ref?: React.Ref<TextInput>;
 } & React.ComponentProps<typeof TextInput>) {
+  const { wrapRef, onFocusInput } = useFieldScroller();
+
+  // Scroll the tapped field above the keyboard when it gains focus.
+  function handleFocus(e: Parameters<NonNullable<typeof onFocus>>[0]) {
+    if (fieldKey) onFocusInput();
+    onFocus?.(e);
+  }
+
   return (
-    <View style={styles.fieldWrap}>
+    <View ref={wrapRef} collapsable={false} style={styles.fieldWrap}>
       <Text style={styles.label}>{label}</Text>
       <View style={styles.inputRow}>
         <Ionicons name={icon} size={18} color={Colors.muted} />
         <TextInput
+          ref={ref}
           style={styles.input}
           placeholderTextColor={Colors.muted}
           autoCapitalize="none"
           autoCorrect={false}
           {...props}
+          onFocus={handleFocus}
         />
       </View>
     </View>
@@ -116,24 +203,22 @@ export function ErrorBanner({ message }: { message: string | null }) {
 }
 
 // Backend credentials box. The owner pastes the Supabase URL and anon key
-// once, by hand. QR scan will fill the same two fields later.
-// Shown only when no backend is saved yet, or when the saved one fails.
+// once, by hand. Shown only when no backend is saved yet.
 export function BackendConfigFields({
   url,
   setUrl,
   anonKey,
   setAnonKey,
   onCancel,
-  onQrPress,
 }: {
   url: string;
   setUrl: (v: string) => void;
   anonKey: string;
   setAnonKey: (v: string) => void;
   onCancel?: () => void;
-  onQrPress?: () => void;
 }) {
   const [showKey, setShowKey] = useState(false);
+  const { wrapRef, onFocusInput } = useFieldScroller();
   return (
     <View style={styles.backendBox}>
       <View style={styles.backendHeader}>
@@ -146,12 +231,14 @@ export function BackendConfigFields({
       <Field
         label="Supabase URL"
         icon="link"
+        fieldKey="backend-url"
         value={url}
         onChangeText={setUrl}
         autoCapitalize="none"
         keyboardType="url"
+        autoComplete="off"
       />
-      <View style={styles.fieldWrap}>
+      <View ref={wrapRef} collapsable={false} style={styles.fieldWrap}>
         <Text style={styles.label}>Anon key</Text>
         <View style={styles.inputRow}>
           <Ionicons name="key" size={18} color={Colors.muted} />
@@ -159,8 +246,10 @@ export function BackendConfigFields({
             style={styles.input}
             value={anonKey}
             onChangeText={setAnonKey}
+            onFocus={onFocusInput}
             autoCapitalize="none"
             autoCorrect={false}
+            autoComplete="off"
             secureTextEntry={!showKey}
             multiline={false}
           />
@@ -173,37 +262,24 @@ export function BackendConfigFields({
           </Pressable>
         </View>
       </View>
-      {/* TODO: wire QR scan here with expo-camera. It should parse
-          {"url": ..., "anonKey": ...} and call setUrl + setAnonKey. */}
-      <View style={styles.backendActions}>
-        <Pressable
-          onPress={onQrPress}
-          disabled={!onQrPress}
-          style={[styles.backendBtn, !onQrPress && styles.backendBtnDisabled]}
-        >
-          <Ionicons name="qr-code" size={16} color={Colors.secondary} />
-          <Text style={styles.backendBtnText}>Scan QR code</Text>
-        </Pressable>
-        {onCancel && (
+      {onCancel && (
+        <View style={styles.backendActions}>
           <Pressable onPress={onCancel} style={styles.backendBtn} hitSlop={8}>
             <Ionicons name="close" size={16} color={Colors.muted} />
             <Text style={styles.backendBtnText}>Cancel</Text>
           </Pressable>
-        )}
-      </View>
+        </View>
+      )}
     </View>
   );
 }
 
 // Small recovery box. Rendered only after a backend failure so the normal
-// login screen stays clean. One button re-opens the manual code fields,
-// the other is reserved for QR scan.
+// login screen stays clean. Its button re-opens the manual code fields.
 export function BackendRecoveryButtons({
   onReenter,
-  onQrPress,
 }: {
   onReenter: () => void;
-  onQrPress?: () => void;
 }) {
   return (
     <View style={styles.backendBox}>
@@ -212,24 +288,14 @@ export function BackendRecoveryButtons({
         <Text style={styles.backendTitle}>Cannot reach backend</Text>
       </View>
       <Text style={styles.backendHint}>
-        The saved connection failed. Re-enter the codes or scan the owner QR.
+        The saved connection failed. Re-enter the backend codes below.
       </Text>
       <View style={styles.backendActions}>
         <Pressable onPress={onReenter} style={styles.backendBtn} hitSlop={8}>
           <Ionicons name="create" size={16} color={Colors.secondary} />
           <Text style={styles.backendBtnText}>Re-enter backend codes</Text>
         </Pressable>
-        <Pressable
-          onPress={onQrPress}
-          disabled={!onQrPress}
-          style={[styles.backendBtn, !onQrPress && styles.backendBtnDisabled]}
-          hitSlop={8}
-        >
-          <Ionicons name="qr-code" size={16} color={Colors.secondary} />
-          <Text style={styles.backendBtnText}>Scan QR instead</Text>
-        </Pressable>
       </View>
-      {/* TODO: implement QR scan screen with expo-camera, then pass onQrPress. */}
     </View>
   );
 }
@@ -246,14 +312,7 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 18,
-    backgroundColor: Colors.primary,
-    alignItems: "center",
-    justifyContent: "center",
     marginBottom: 18,
-    shadowColor: Colors.primary,
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 6,
   },
   eyebrow: {
     color: Colors.secondary,
@@ -321,7 +380,6 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     backgroundColor: Colors.bg,
   },
-  backendBtnDisabled: { opacity: 0.45 },
   backendBtnText: { color: Colors.text, fontSize: 13, fontWeight: "600" },
   button: {
     backgroundColor: Colors.primary,

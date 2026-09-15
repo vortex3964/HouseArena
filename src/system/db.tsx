@@ -6,6 +6,7 @@
 
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createURL } from "expo-linking";
 import {
   friendlyAuthError,
   validateEmail,
@@ -44,7 +45,13 @@ export async function signUpWithEmail(
   const { data, error } = await client.auth.signUp({
     email: email.trim(),
     password,
-    options: { data: { username: username.trim() } },
+    options: {
+      data: { username: username.trim() },
+      // After tapping the confirmation mail, Supabase sends the user
+      // back into the app instead of a localhost page phones can't open.
+      // In Expo Go this is an exp:// URL, in builds housearena://.
+      emailRedirectTo: createURL("auth/callback"),
+    },
   });
   if (error) throw new Error(friendlyAuthError(error));
   return data;
