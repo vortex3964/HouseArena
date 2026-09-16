@@ -27,7 +27,8 @@ import {
 // Settings lives at the bottom of the drawer. It shows the saved backend
 // values, the active household invite code, and the password changer.
 export default function Settings() {
-  const { activeHousehold, households, client } = useAuth();
+  const { activeHousehold, households, client, dataError, refreshSessionData } =
+    useAuth();
   const [backend, setBackend] = useState<BackendConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [showKey, setShowKey] = useState(false);
@@ -107,6 +108,13 @@ export default function Settings() {
       showsVerticalScrollIndicator={false}
     >
       <Text style={styles.title}>Settings</Text>
+
+      {dataError ? (
+        <>
+          <ErrorBanner message={dataError} />
+          <PrimaryButton title="Retry" onPress={() => refreshSessionData()} />
+        </>
+      ) : null}
 
       <View style={styles.card}>
         <View style={styles.row}>

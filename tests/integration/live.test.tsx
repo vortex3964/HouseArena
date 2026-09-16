@@ -8,7 +8,7 @@ import {
   useHouseholdMembers,
   useHouseholdTasks,
 } from "../../src/system/db";
-import { useLiveHousehold } from "../../src/system/live";
+import { useLiveHousehold, useLiveLogs } from "../../src/system/live";
 import { FakeClient } from "../fake/fake_supabase";
 import { ANA, BOB, createSeed } from "../fake/seed";
 
@@ -42,13 +42,12 @@ beforeEach(() => {
 });
 
 describe("subscription setup", () => {
-  it("opens one channel with four filtered bindings, none without a household", () => {
+  it("opens one channel with three filtered bindings, none without a household", () => {
     const { unmount } = renderHook(() => useLiveHousehold(client, ANA.id, 1));
     expect(fake.calls.subscribe).toBe(1);
     const bindings = fake.bindingsFor("household-1");
-    expect(bindings).toHaveLength(4);
+    expect(bindings).toHaveLength(3);
     expect(bindings.map((b) => b.table).sort()).toEqual([
-      "activity_logs",
       "household_members",
       "households",
       "tasks",
@@ -124,11 +123,59 @@ describe("tasks channel", () => {
 });
 
 describe("logs channel", () => {
+  function useFeed(householdId: number | null) {
+    return renderHook(
+      ({ id }: { id: number | null }) => {
+        const logs = useHouseholdLogs(client, id);
+        useLiveLogs(client, id);
+        return logs;
+      },
+      { wrapper, initialProps: { id: householdId } },
+    );
+  }
+
+  it("opens its own filtered channel, none without a household", () => {
+    const { unmount } = useFeed(1);
+    expect(fake.calls.subscribe).toBe(1);
+    const bindings = fake.bindingsFor("logs-1");
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0].table).toBe("activity_logs");
+    expect(bindings[0].filter).toBe("household_id=eq.1");
+    unmount();
+    expect(fake.calls.removeChannel).toBe(1);
+
+    const second = useFeed(null);
+    expect(fake.calls.subscribe).toBe(1);
+    second.unmount();
+  });
+
+  it("stops everything when the tab is left (id flips to null)", async () => {
+    const hook = useFeed(1);
+    await waitFor(() => expect(hook.result.current.data).toHaveLength(30));
+    hook.rerender({ id: null });
+    const removes = fake.calls.removeChannel;
+    expect(removes).toBeGreaterThan(0);
+    fake.resetCalls();
+    await act(async () => {
+      fake.emit("activity_logs", "INSERT", {
+        id: 100,
+        household_id: 1,
+        owner: "ana",
+        details: "After blur",
+        created_at: "2026-09-01T00:00:00Z",
+      });
+    });
+    // Channel gone: nothing merged, nothing refetched.
+    expect(queryClient.getQueryData<any[]>(qk.logs(1))).toHaveLength(30);
+    expect(fake.calls.select).toBe(0);
+    hook.unmount();
+  });
+
   it("prepends newest and trims to the 30 cap", async () => {
     const { result } = renderHook(
       () => {
         const logs = useHouseholdLogs(client, 1);
-        useLiveHousehold(client, ANA.id, 1);
+        useLiveLogs(client, 1);
         return logs;
       },
       { wrapper },

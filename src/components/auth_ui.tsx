@@ -88,7 +88,7 @@ export function AuthScreen({
           showsVerticalScrollIndicator={false}
         >
           <Image
-            source={require("../../assets/images/appImages/logo.png")}
+            source={require("../../assets/images/appImages/logo-128.png")}
             style={styles.badge}
           />
           <Text style={styles.eyebrow}>{eyebrow}</Text>
@@ -111,12 +111,16 @@ export function useFieldScroller() {
     // Web scrolls focused inputs into view by itself, and its
     // findNodeHandle throws instead of measuring, so skip it there.
     if (Platform.OS === "web") return;
-    const node = findNodeHandle(wrapRef.current);
-    const parent = scroller?.getScrollHandle();
-    if (node != null && parent != null) {
-      UIManager.measureLayout(node, parent, () => {}, (_x, y) =>
-        scroller?.smoothScroll(Math.max(0, y - 96)),
-      );
+    try {
+      const node = findNodeHandle(wrapRef.current);
+      const parent = scroller?.getScrollHandle();
+      if (node != null && parent != null) {
+        UIManager.measureLayout(node, parent, () => {}, (_x, y) =>
+          scroller?.smoothScroll(Math.max(0, y - 96)),
+        );
+      }
+    } catch {
+      // Layout not ready (rare on Fabric): leave scroll position alone.
     }
   }, [scroller]);
 

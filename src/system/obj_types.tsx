@@ -2,7 +2,7 @@
 // One user can belong to many households through household_members.
 
 export type TaskDifficulty = "easy" | "medium" | "hard";
-export type TaskStatus = "free" | "taken" | "completed";
+export type TaskStatus = "free" | "taken" | "in_review" | "completed";
 export type MemberRole = "owner" | "admin" | "member";
 
 export type Profile = {
@@ -28,6 +28,7 @@ export type Task = {
   owner: string | null;
   created_by: string | null;
   created_at: string;
+  completed_at: string | null;
 };
 
 export type Household = {

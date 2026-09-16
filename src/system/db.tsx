@@ -19,11 +19,17 @@ import type {
   MyHousehold,
   Profile,
   Task,
+  TaskDifficulty,
 } from "./obj_types";
+import { Lengths, Limits, PointsBands, QueryCache } from "../global/constants";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 30_000, gcTime: 5 * 60_000, retry: 1 },
+    queries: {
+      staleTime: QueryCache.STALE_TIME,
+      gcTime: QueryCache.GC_TIME,
+      retry: QueryCache.RETRY,
+    },
   },
 });
 
@@ -159,8 +165,8 @@ export async function createHousehold(
   return data as Household;
 }
 
-// Joins with the 6-letter code shown to household members.
-// Example: joinHouseholdByCode(c, "KX7Q2M")
+// Joins with the invite code shown to household members.
+// Example: joinHouseholdByCode(c, "KX7Q2MAB12CD")
 export async function joinHouseholdByCode(
   client: SupabaseClient,
   code: string,
@@ -199,9 +205,59 @@ export async function fetchHouseholdTasks(
     )
     .eq("household_id", householdId)
     .order("created_at", { ascending: true })
-    .limit(50);
+    .limit(Limits.TASKS_PAGE);
   if (error) throw new Error(error.message);
   return (data ?? []) as Task[];
+}
+
+// Creates a free task card. Title length and the points band are checked
+// here so a bad value gets a friendly error instead of a raw Postgres
+// constraint violation. RLS still enforces membership, free status, and
+// null owner server-side; created_by defaults to the caller in SQL.
+export async function createTask(
+  client: SupabaseClient,
+  input: {
+    householdId: number;
+    title: string;
+    description?: string | null;
+    difficulty: TaskDifficulty;
+    points: number;
+  },
+): Promise<Task> {
+  const title = input.title.trim();
+  if (!title) throw new Error("Type a task title.");
+  if (title.length > Lengths.TASK_TITLE)
+    throw new Error(
+      `Keep titles under ${Lengths.TASK_TITLE} characters.`,
+    );
+  const band = PointsBands[input.difficulty];
+  if (!band) throw new Error("Pick a valid difficulty.");
+  if (
+    !Number.isInteger(input.points) ||
+    input.points < band.min ||
+    input.points > band.max
+  )
+    throw new Error(
+      `${input.difficulty} tasks pay ${band.min}-${band.max} points.`,
+    );
+  const description = input.description?.trim() || null;
+  const { data, error } = await client
+    .from("tasks")
+    .insert({
+      household_id: input.householdId,
+      title,
+      description,
+      difficulty: input.difficulty,
+      points: input.points,
+      status: "free",
+      owner: null,
+    })
+    .select(
+      "id,title,description,difficulty,points,status,household_id,owner,created_by,created_at",
+    )
+    .single();
+  if (error) throw new Error(error.message);
+  return data as Task;
 }
 
 // Recent activity of one household, newest first, capped like the prune.
@@ -216,6 +272,38 @@ export async function fetchHouseholdLogs(
   return (data ?? []) as ActivityLog[];
 }
 
+// Writes one log row through the RPC so the owner name is stamped
+// server-side from the caller account. Empty text is rejected here;
+// over-long text is trimmed to the server cap of 500 chars.
+export async function addLog(
+  client: SupabaseClient,
+  householdId: number,
+  details: string,
+): Promise<ActivityLog> {
+  const clean = details.trim();
+  if (!clean) throw new Error("Type what happened first.");
+  const { data, error } = await client.rpc("log_activity", {
+    p_household_id: householdId,
+    p_details: clean.slice(0, 500),
+  });
+  if (error) throw new Error(error.message);
+  return data as ActivityLog;
+}
+
+// Moves the caller's taken task into review. The server owns the
+// transition (member + owner + taken checks); completing stays open
+// from both taken and in_review, so review is a lane, not a gate.
+export async function submitForReview(
+  client: SupabaseClient,
+  taskId: number,
+): Promise<Task> {
+  const { data, error } = await client.rpc("submit_for_review", {
+    p_task_id: taskId,
+  });
+  if (error) throw new Error(error.message);
+  return data as Task;
+}
+
 // Members with public profile fields only, never emails.
 export async function fetchHouseholdMembers(
   client: SupabaseClient,
@@ -228,7 +316,7 @@ export async function fetchHouseholdMembers(
     )
     .eq("household_id", householdId)
     .order("joined_at", { ascending: true })
-    .limit(50);
+    .limit(Limits.MEMBERS_PAGE);
   if (error) throw new Error(error.message);
   const rows = (data ?? []) as unknown as Array<{
     household_id: number;
@@ -271,7 +359,8 @@ export function useMyProfile(
 }
 
 // Board hooks. Enabled only with a household, so logged-out screens
-// and the homeless state cost zero queries.
+// and the homeless state cost zero queries. Long stale time plus no
+// remount/focus refetch: the realtime subscription owns freshness.
 export function useHouseholdTasks(
   client: SupabaseClient | null,
   householdId: number | null,
@@ -280,6 +369,9 @@ export function useHouseholdTasks(
     queryKey: qk.tasks(householdId),
     enabled: !!client && householdId != null,
     queryFn: () => fetchHouseholdTasks(client!, householdId!),
+    staleTime: QueryCache.LIVE_STALE_TIME,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -291,6 +383,9 @@ export function useHouseholdLogs(
     queryKey: qk.logs(householdId),
     enabled: !!client && householdId != null,
     queryFn: () => fetchHouseholdLogs(client!, householdId!),
+    staleTime: QueryCache.LIVE_STALE_TIME,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -302,5 +397,8 @@ export function useHouseholdMembers(
     queryKey: qk.members(householdId),
     enabled: !!client && householdId != null,
     queryFn: () => fetchHouseholdMembers(client!, householdId!),
+    staleTime: QueryCache.LIVE_STALE_TIME,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
   });
 }

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  addLog,
   createHousehold,
   fetchHouseholdLogs,
   fetchHouseholdMembers,
@@ -11,6 +12,7 @@ import {
   resolveEmailForUsername,
   signInWithUsername,
   signUpWithEmail,
+  submitForReview,
 } from "../../src/system/db";
 import { ANA, BOB, CHARLIE, createSeed } from "../fake/seed";
 import { FakeClient } from "../fake/fake_supabase";
@@ -191,5 +193,69 @@ describe("board fetches", () => {
       expect(m.profile).not.toHaveProperty("email");
       expect(m.profile).toHaveProperty("username");
     }
+  });
+});
+
+describe("addLog", () => {
+  it("writes through the RPC with the caller stamped as owner", async () => {
+    fake.signInAs(ANA.id);
+    const entry = await addLog(client, 1, "  Ana did the dishes  ");
+    expect(entry).toMatchObject({
+      household_id: 1,
+      owner: "ana",
+      details: "Ana did the dishes",
+    });
+    expect(entry.id).toBeGreaterThan(0);
+  });
+
+  it("rejects empty text client-side without an rpc", async () => {
+    fake.signInAs(ANA.id);
+    fake.resetCalls();
+    await expect(addLog(client, 1, "   ")).rejects.toThrow(
+      "Type what happened first.",
+    );
+    expect(fake.calls.rpc).toBe(0);
+  });
+
+  it("trims over-long text to the server cap", async () => {
+    fake.signInAs(BOB.id);
+    const entry = await addLog(client, 1, "x".repeat(600));
+    expect(entry.details).toHaveLength(500);
+  });
+
+  it("refuses writes from non-members", async () => {
+    fake.signInAs(CHARLIE.id);
+    await expect(addLog(client, 2, "Sneaky")).rejects.toThrow(
+      "Not a member of this household",
+    );
+  });
+});
+
+describe("submitForReview", () => {
+  it("moves the holder's taken task into review", async () => {
+    fake.signInAs(BOB.id);
+    const task = await submitForReview(client, 56);
+    expect(task).toMatchObject({ id: 56, status: "in_review", owner: BOB.id });
+  });
+
+  it("rejects holders that do not own the task", async () => {
+    fake.signInAs(ANA.id);
+    await expect(submitForReview(client, 56)).rejects.toThrow(
+      "not owned or not taken",
+    );
+  });
+
+  it("rejects tasks that are not taken", async () => {
+    fake.signInAs(ANA.id);
+    await expect(submitForReview(client, 1)).rejects.toThrow(
+      "not owned or not taken",
+    );
+  });
+
+  it("rejects unknown tasks", async () => {
+    fake.signInAs(ANA.id);
+    await expect(submitForReview(client, 9999)).rejects.toThrow(
+      "does not exist",
+    );
   });
 });

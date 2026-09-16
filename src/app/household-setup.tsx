@@ -1,103 +1,18 @@
-import { useState } from "react";
-import { Pressable, StyleSheet, Text } from "react-native";
 import { router } from "expo-router";
 import { useAuth } from "../system/AuthProvider";
-import { Colors } from "../global/theme";
-import {
-  AuthScreen,
-  ErrorBanner,
-  Field,
-  PrimaryButton,
-} from "../components/auth_ui";
+import { Routes } from "../global/constants";
+import { HouseholdForm } from "../components/household_form";
 
 // Shown to logged-in users with zero households.
 // Same three paths as the register household step.
 export default function HouseholdSetup() {
-  const { authLoading, createHousehold, joinHousehold, skipHouseholdSetup } =
-    useAuth();
-  const [householdName, setHouseholdName] = useState("");
-  const [inviteCode, setInviteCode] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  // Owner path, creates a household and makes you its owner.
-  async function onCreate() {
-    setError(null);
-    try {
-      await createHousehold(householdName);
-      router.replace("/");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  // Member path, joins with the 6-letter code from another member.
-  async function onJoin() {
-    setError(null);
-    try {
-      await joinHousehold(inviteCode);
-      router.replace("/");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
+  const { skipHouseholdSetup } = useAuth();
 
   // Enters the app without a household, asked again next login.
   function onSkip() {
     skipHouseholdSetup();
-    router.replace("/");
+    router.replace(Routes.HOME);
   }
 
-  return (
-    <AuthScreen
-      eyebrow="Almost done"
-      title="Join a household"
-      subtitle="Create your own, join with an invite code, or skip for later."
-    >
-      <Field
-        label="New household name"
-        icon="home"
-        fieldKey="household-name"
-        value={householdName}
-        onChangeText={setHouseholdName}
-        maxLength={50}
-        returnKeyType="done"
-        onSubmitEditing={onCreate}
-      />
-      <PrimaryButton
-        title="Create household"
-        onPress={onCreate}
-        loading={authLoading}
-      />
-      <Field
-        label="Invite code"
-        icon="ticket"
-        fieldKey="invite-code"
-        value={inviteCode}
-        onChangeText={(v) => setInviteCode(v.toUpperCase())}
-        autoCapitalize="characters"
-        autoCorrect={false}
-        maxLength={12}
-        returnKeyType="done"
-        onSubmitEditing={onJoin}
-      />
-      <PrimaryButton
-        title="Join with code"
-        onPress={onJoin}
-        loading={authLoading}
-      />
-      <ErrorBanner message={error} />
-      <Pressable onPress={onSkip} hitSlop={8}>
-        <Text style={styles.skip}>Skip for now</Text>
-      </Pressable>
-    </AuthScreen>
-  );
+  return <HouseholdForm onSkip={onSkip} />;
 }
-
-const styles = StyleSheet.create({
-  skip: {
-    color: Colors.subtext0,
-    fontSize: 14,
-    fontWeight: "600",
-    textAlign: "center",
-  },
-});

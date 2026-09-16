@@ -53,20 +53,21 @@ serve(async (req) => {
       const hourAgo = new Date(Date.now() - 3600_000).toISOString();
       await admin.from("password_reset_requests").delete().eq("email", clean).lt("created_at", hourAgo);
       // Max 3 codes per address per hour, abuse and harassment brake.
+      // Counted only for real accounts, so strangers cannot burn
+      // someone else's quota with unknown addresses.
+      const { data: profile } = await admin
+        .from("profiles")
+        .select("id")
+        .eq("email", clean)
+        .maybeSingle();
+      if (!profile) return ok();
       const { count } = await admin
         .from("password_reset_requests")
         .select("id", { count: "exact", head: true })
         .eq("email", clean)
         .gte("created_at", hourAgo);
       if ((count ?? 0) >= 3) return ok();
-
-      const { data: profile } = await admin
-        .from("profiles")
-        .select("id")
-        .eq("email", clean)
-        .maybeSingle();
       await admin.from("password_reset_requests").insert({ email: clean });
-      if (!profile) return ok();
 
       const plain = resetCode();
       await admin.from("password_reset_codes").insert({
@@ -101,30 +102,40 @@ serve(async (req) => {
 
     if (action === "confirm") {
       if (!validEmail) return fail();
-      // Sweep this email's expired codes first, latest valid row wins below.
+      // Sweep this email's expired codes first, then consider every
+      // remaining one: a newer request must not kill an older live code.
       await admin
         .from("password_reset_codes")
         .delete()
         .eq("email", clean)
         .lt("expires_at", new Date().toISOString());
-      const { data: row } = await admin
+      const { data: rows } = await admin
         .from("password_reset_codes")
         .select("id, code_hash, expires_at, attempts")
         .eq("email", clean)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (!row || row.attempts >= 5 || new Date(row.expires_at) < new Date())
-        return fail();
+        .order("created_at", { ascending: false });
       const guess = await sha256Hex(`${clean}:${String(code ?? "").trim()}`);
-      if (guess !== row.code_hash) {
-        await admin
-          .from("password_reset_codes")
-          .update({ attempts: row.attempts + 1 })
-          .eq("id", row.id);
+      const row = (rows ?? []).find(
+        (r) =>
+          r.attempts < 5 &&
+          new Date(r.expires_at) >= new Date() &&
+          r.code_hash === guess,
+      );
+      if (!row) {
+        // Wrong guess bumps only the newest row, so one bad attempt
+        // cannot burn every live code at once.
+        const latest = (rows ?? [])[0];
+        if (latest && latest.attempts < 5) {
+          await admin
+            .from("password_reset_codes")
+            .update({ attempts: latest.attempts + 1 })
+            .eq("id", latest.id);
+        }
         return fail();
       }
       const pw = String(newPassword ?? "");
+      // Length checked only after a correct code, so the two cases
+      // stay indistinguishable to anyone probing codes.
       if (pw.length < 6) {
         return new Response(
           JSON.stringify({ ok: false, error: "Password needs at least 6 characters." }),
@@ -140,8 +151,10 @@ serve(async (req) => {
       const { error } = await admin.auth.admin.updateUserById(profile.id, {
         password: pw,
       });
-      await admin.from("password_reset_codes").delete().eq("email", clean);
+      // Codes die only after the password actually changed, so a
+      // transient failure just means trying the same code again.
       if (error) return fail();
+      await admin.from("password_reset_codes").delete().eq("email", clean);
       return ok();
     }
 

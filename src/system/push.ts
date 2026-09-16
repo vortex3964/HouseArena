@@ -2,15 +2,20 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { Messages } from "../global/constants";
 
 type NotificationsModule = typeof import("expo-notifications");
 
-// Remote push was removed from Expo Go, and the static import throws
-// there at load time, so the module loads lazily. Null means pushes
-// are unavailable and the app simply runs without them.
+// Remote push was removed from Expo Go, so the module loads lazily and
+// never in Expo Go. require() (not dynamic import()) is deliberate: it
+// always resolves through the module registry, while import() can slip
+// past mocks and bundler analysis. Null means pushes are unavailable
+// and the app simply runs without them.
+declare const require: (id: string) => any;
+
 let cached: NotificationsModule | null | undefined;
 
-async function getNotifications(): Promise<NotificationsModule | null> {
+function getNotifications(): NotificationsModule | null {
   if (cached !== undefined) return cached;
   // Expo Go cannot even evaluate this module (it throws on Android),
   // so it is never imported there. Dev and store builds proceed.
@@ -19,7 +24,7 @@ async function getNotifications(): Promise<NotificationsModule | null> {
     return cached;
   }
   try {
-    cached = await import("expo-notifications");
+    cached = require("expo-notifications") as NotificationsModule;
   } catch {
     cached = null;
   }
@@ -28,18 +33,18 @@ async function getNotifications(): Promise<NotificationsModule | null> {
 
 // Foreground pushes show a banner instead of vanishing silently.
 export function setupNotificationHandler() {
-  getNotifications()
-    .then((N) => {
-      N?.setNotificationHandler({
-        handleNotification: async () => ({
-          shouldShowBanner: true,
-          shouldShowList: true,
-          shouldPlaySound: false,
-          shouldSetBadge: false,
-        }),
-      });
-    })
-    .catch(() => {});
+  try {
+    getNotifications()?.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: false,
+        shouldSetBadge: false,
+      }),
+    });
+  } catch {
+    // Push unavailable; the app runs without it.
+  }
 }
 
 const TOKEN_CACHE = "housearena.push_token_sent";
@@ -52,7 +57,7 @@ export async function registerPushToken(
 ): Promise<void> {
   try {
     if (Platform.OS === "web") return;
-    const N = await getNotifications();
+    const N = getNotifications();
     if (!N) return;
     const projectId = Constants.expoConfig?.extra?.eas?.projectId;
     if (!projectId) return;
@@ -86,21 +91,38 @@ export async function registerPushToken(
 
 // Asks for a reset code by push. Always resolves quietly, never
 // reveals whether the address exists, matching the function behavior.
+const RESET_FUNCTION_PATH = "/functions/v1/request-password-reset";
+
+function resetEndpoint(url: string): string {
+  return `${url.replace(/\/+$/, "")}${RESET_FUNCTION_PATH}`;
+}
+
+function resetHeaders(anonKey: string): Record<string, string> {
+  return { apikey: anonKey, "Content-Type": "application/json" };
+}
+
 export async function requestResetCode(
   url: string,
   anonKey: string,
   email: string,
 ): Promise<void> {
   const clean = email.trim();
-  if (!clean) throw new Error("Type your email first.");
-  await fetch(
-    `${url.replace(/\/+$/, "")}/functions/v1/request-password-reset`,
-    {
+  if (!clean) throw new Error(Messages.TYPE_EMAIL_FIRST);
+  try {
+    const res = await fetch(resetEndpoint(url), {
       method: "POST",
-      headers: { apikey: anonKey, "Content-Type": "application/json" },
+      headers: resetHeaders(anonKey),
       body: JSON.stringify({ action: "request", email: clean }),
-    },
-  ).catch(() => {});
+    });
+    if (!res.ok)
+      throw new Error("Couldn't reach the server - check your connection.");
+  } catch (e) {
+    // A dead network must say so; anything the server answered stays
+    // generic so the box cannot probe which emails exist.
+    if (e instanceof TypeError)
+      throw new Error("Couldn't reach the server - check your connection.");
+    throw e;
+  }
 }
 
 // Spends the pushed code for a new password. Throws the server message
@@ -112,19 +134,16 @@ export async function confirmResetCode(
   code: string,
   newPassword: string,
 ): Promise<void> {
-  const res = await fetch(
-    `${url.replace(/\/+$/, "")}/functions/v1/request-password-reset`,
-    {
-      method: "POST",
-      headers: { apikey: anonKey, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "confirm",
-        email: email.trim(),
-        code: code.trim(),
-        newPassword,
-      }),
-    },
-  ).catch(() => null);
+  const res = await fetch(resetEndpoint(url), {
+    method: "POST",
+    headers: resetHeaders(anonKey),
+    body: JSON.stringify({
+      action: "confirm",
+      email: email.trim(),
+      code: code.trim(),
+      newPassword,
+    }),
+  }).catch(() => null);
   const body = (await res?.json().catch(() => null)) as {
     ok?: boolean;
     error?: string;

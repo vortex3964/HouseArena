@@ -422,6 +422,55 @@ export class FakeClient {
           .slice(0, 30);
         return { data: rows, error: null };
       }
+      case "submit_for_review": {
+        const task = this.tables.tasks.find((t) => t.id === params.p_task_id);
+        if (!this.currentUserId) {
+          return { data: null, error: { message: "Not authenticated" } };
+        }
+        if (!task) {
+          return {
+            data: null,
+            error: { message: `Task ${params.p_task_id} does not exist` },
+          };
+        }
+        if (
+          !this.tables.household_members.some(
+            (m) => m.household_id === task.household_id && m.profile_id === this.currentUserId,
+          )
+        ) {
+          return { data: null, error: { message: "Not a member of this household" } };
+        }
+        if (task.owner !== this.currentUserId || task.status !== "taken") {
+          return {
+            data: null,
+            error: {
+              message: `Task ${task.id} cannot be reviewed by this user (not owned or not taken)`,
+            },
+          };
+        }
+        task.status = "in_review";
+        return { data: { ...task }, error: null };
+      }
+      case "log_activity": {
+        const hid = params.p_household_id;
+        if (
+          !this.tables.household_members.some(
+            (m) => m.household_id === hid && m.profile_id === this.currentUserId,
+          )
+        ) {
+          return { data: null, error: { message: "Not a member of this household" } };
+        }
+        const me = this.tables.profiles.find((p) => p.id === this.currentUserId);
+        const entry = {
+          id: this.tables.nextIds.log++,
+          household_id: hid,
+          owner: me ? me.username : null,
+          details: String(params.p_details ?? "").trim().slice(0, 500),
+          created_at: new Date().toISOString(),
+        };
+        this.tables.activity_logs.push(entry);
+        return { data: entry, error: null };
+      }
       default:
         return { data: null, error: { message: `unknown rpc ${name}` } };
     }

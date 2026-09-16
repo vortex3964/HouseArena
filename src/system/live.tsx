@@ -22,7 +22,9 @@ function removeById<T extends { id: number }>(list: T[], id: number): T[] {
   return list.filter((r) => r.id !== id);
 }
 
-// One channel per active household, four filtered bindings on it.
+// One channel per active household, three filtered bindings on it
+// (tasks, members, household meta). Logs have their own hook below so
+// the feed is tracked only while its tab is open.
 // Every payload writes straight into the TanStack cache, zero SELECTs,
 // except a new member join which refetches once to get their profile.
 export function useLiveHousehold(
@@ -34,7 +36,6 @@ export function useLiveHousehold(
     if (!client || householdId == null) return;
 
     const tasksKey = qk.tasks(householdId);
-    const logsKey = qk.logs(householdId);
     const membersKey = qk.members(householdId);
 
     const channel = client
@@ -62,31 +63,6 @@ export function useLiveHousehold(
             next.sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
             return next;
           });
-        },
-      )
-      // Activity feed: newest on top, trimmed like the prune cap.
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "activity_logs",
-          filter: `household_id=eq.${householdId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "DELETE") {
-            const id = (payload.old as { id: number }).id;
-            queryClient.setQueryData<ActivityLog[]>(logsKey, (old) =>
-              old ? removeById(old, id) : old,
-            );
-            return;
-          }
-          const row = payload.new as ActivityLog;
-          queryClient.setQueryData<ActivityLog[]>(logsKey, (old) =>
-            upsertById(old ?? [], row)
-              .sort((a, b) => (a.created_at > b.created_at ? -1 : 1))
-              .slice(0, 30),
-          );
         },
       )
       // Members: role edits and leaves patch directly. A fresh join
@@ -158,4 +134,51 @@ export function useLiveHousehold(
       client.removeChannel(channel);
     };
   }, [client, userId, householdId]);
+}
+
+// Activity feed on its own channel, owned by the logs tab only.
+// Mount it with a household id while focused, with null otherwise:
+// subscribing starts tracking, cleanup stops it, zero cost off-tab.
+// Newest on top, trimmed like the prune cap, zero SELECTs.
+export function useLiveLogs(
+  client: SupabaseClient | null,
+  householdId: number | null,
+) {
+  useEffect(() => {
+    if (!client || householdId == null) return;
+
+    const logsKey = qk.logs(householdId);
+
+    const channel = client
+      .channel(`logs-${householdId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "activity_logs",
+          filter: `household_id=eq.${householdId}`,
+        },
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            const id = (payload.old as { id: number }).id;
+            queryClient.setQueryData<ActivityLog[]>(logsKey, (old) =>
+              old ? removeById(old, id) : old,
+            );
+            return;
+          }
+          const row = payload.new as ActivityLog;
+          queryClient.setQueryData<ActivityLog[]>(logsKey, (old) =>
+            upsertById(old ?? [], row)
+              .sort((a, b) => (a.created_at > b.created_at ? -1 : 1))
+              .slice(0, 30),
+          );
+        },
+      )
+      .subscribe();
+
+    return () => {
+      client.removeChannel(channel);
+    };
+  }, [client, householdId]);
 }

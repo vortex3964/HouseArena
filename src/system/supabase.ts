@@ -11,6 +11,7 @@ import { Platform } from "react-native";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
+import { Lengths, Messages, Timeouts } from "../global/constants";
 
 const CONFIG_KEY = "housearena.supabase.config";
 // Keys used by earlier builds, migrated to CONFIG_KEY automatically.
@@ -90,7 +91,7 @@ async function storeSet(key: string, value: string): Promise<void> {
   }
   await withTimeout(
     SecureStore.setItemAsync(key, value),
-    8000,
+    Timeouts.SECURE_STORE_OP,
     "Secure storage write",
   );
 }
@@ -101,7 +102,7 @@ async function storeGet(key: string): Promise<string | null> {
   }
   return withTimeout(
     SecureStore.getItemAsync(key),
-    8000,
+    Timeouts.SECURE_STORE_OP,
     "Secure storage read",
   );
 }
@@ -113,7 +114,7 @@ async function storeDel(key: string): Promise<void> {
   }
   await withTimeout(
     SecureStore.deleteItemAsync(key),
-    8000,
+    Timeouts.SECURE_STORE_OP,
     "Secure storage delete",
   );
 }
@@ -122,8 +123,12 @@ async function storeDel(key: string): Promise<void> {
 // to SecureStore in chunks (values have a ~2KB limit per item).
 const CHUNK_SIZE = 1800;
 const chunkKey = (key: string, i: number) => `${key}.${i}`;
+// Last session key touched this run, so logout can wipe it even when
+// sign-out itself never reached storage.
+let lastAuthKey: string | null = null;
 
 async function secureAuthGet(key: string): Promise<string | null> {
+  lastAuthKey = key;
   const count = Number(await SecureStore.getItemAsync(chunkKey(key, -1)));
   if (!Number.isFinite(count) || count <= 0) return null;
   let out = "";
@@ -136,6 +141,7 @@ async function secureAuthGet(key: string): Promise<string | null> {
 }
 
 async function secureAuthSet(key: string, value: string): Promise<void> {
+  lastAuthKey = key;
   const oldCount =
     Number(await SecureStore.getItemAsync(chunkKey(key, -1))) || 0;
   const chunks = Math.max(1, Math.ceil(value.length / CHUNK_SIZE));
@@ -152,6 +158,7 @@ async function secureAuthSet(key: string, value: string): Promise<void> {
 }
 
 async function secureAuthDel(key: string): Promise<void> {
+  lastAuthKey = null;
   const count =
     Number(await SecureStore.getItemAsync(chunkKey(key, -1)).catch(() => null)) ||
     0;
@@ -167,12 +174,21 @@ const authStorage =
     : {
         // Generous budget: a session read spans several chunked calls.
         getItem: (k: string) =>
-          withTimeout(secureAuthGet(k), 15000, "Session read"),
+          withTimeout(secureAuthGet(k), Timeouts.SESSION_STORE_OP, "Session read"),
         setItem: (k: string, v: string) =>
-          withTimeout(secureAuthSet(k, v), 15000, "Session write"),
+          withTimeout(secureAuthSet(k, v), Timeouts.SESSION_STORE_OP, "Session write"),
         removeItem: (k: string) =>
-          withTimeout(secureAuthDel(k), 15000, "Session delete"),
+          withTimeout(secureAuthDel(k), Timeouts.SESSION_STORE_OP, "Session delete"),
       };
+
+// Best-effort wipe of this run's session chunks. The normal path already
+// purges through the adapter; this covers sign-out dying mid-flight.
+export async function clearAuthStorage(): Promise<void> {
+  const key = lastAuthKey;
+  lastAuthKey = null;
+  if (key == null) return;
+  await secureAuthDel(key).catch(() => {});
+}
 
 // Config helpers.
 
@@ -290,6 +306,13 @@ export function getSupabase(): SupabaseClient | null {
   return _client;
 }
 
+// Drops the in-memory client without touching stored config, so a fresh
+// login can reconnect silently. Called on sign-out: without this, the
+// module would keep serving the previous account's client.
+export function dropClient(): void {
+  _client = null;
+}
+
 export function getBackendConfigSync(): BackendConfig | null {
   return _config;
 }
@@ -307,15 +330,17 @@ export function getDevPrefill(): BackendConfig | null {
 
 export function validateUsername(username: string): string | null {
   const u = username.trim();
-  if (u.length < 3) return "Username needs at least 3 characters.";
-  if (u.length > 20) return "Username must be 20 characters or less.";
+  if (u.length < Lengths.USERNAME_MIN)
+    return `Username needs at least ${Lengths.USERNAME_MIN} characters.`;
+  if (u.length > Lengths.USERNAME)
+    return `Username must be ${Lengths.USERNAME} characters or less.`;
   if (!/^[a-zA-Z0-9_-]+$/.test(u))
     return "Only letters, numbers, _ and - allowed.";
   return null;
 }
 
 export function validatePassword(password: string): string | null {
-  if (password.length < 6) return "Password needs at least 6 characters.";
+  if (password.length < Lengths.PASSWORD_MIN) return Messages.PASSWORD_TOO_SHORT;
   return null;
 }
 
@@ -330,8 +355,18 @@ export function validateEmail(email: string): string | null {
 }
 
 /** Turn Supabase auth errors into short user-facing messages. */
+function errMessage(e: unknown): string {
+  // PostgREST errors are plain { message } objects, not Error instances.
+  if (e instanceof Error) return e.message;
+  if (typeof e === "object" && e !== null && "message" in e) {
+    const m = (e as { message?: unknown }).message;
+    if (typeof m === "string") return m;
+  }
+  return String(e);
+}
+
 export function friendlyAuthError(e: unknown): string {
-  const msg = e instanceof Error ? e.message : String(e);
+  const msg = errMessage(e);
   if (/invalid login credentials/i.test(msg))
     return "No account matches that username + password.";
   if (/user already registered|already exists/i.test(msg))
@@ -347,6 +382,6 @@ export function friendlyAuthError(e: unknown): string {
 // and not like a wrong username or password. Used to reveal the
 // "re-enter backend codes" buttons on login and register.
 export function isBackendDownError(e: unknown): boolean {
-  const msg = e instanceof Error ? e.message : String(e);
+  const msg = errMessage(e);
   return /reach supabase|fetch|network|failed/i.test(msg);
 }

@@ -17,6 +17,7 @@ import { router, useSegments } from "expo-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
+import { Routes } from "../global/constants";
 import { TopBar } from "../components/top_bar";
 import { ErrorBanner, PrimaryButton } from "../components/auth_ui";
 import { AuthProvider, useAuth } from "../system/AuthProvider";
@@ -45,8 +46,8 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     if (initLoading || dataLoading) return;
     const onAuthRoute = current && AUTH_ROUTES.includes(current);
     const onSetupRoute = current === SETUP_ROUTE;
-    if (!sessionUserId && !onAuthRoute) router.replace("/login");
-    else if (sessionUserId && onAuthRoute) router.replace("/");
+    if (!sessionUserId && !onAuthRoute) router.replace(Routes.LOGIN);
+    else if (sessionUserId && onAuthRoute) router.replace(Routes.HOME);
     // Logged in but homeless: force setup unless skipped this login.
     // Skipped when data failed to load, empty then means unknown.
     else if (
@@ -57,14 +58,14 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       !onSetupRoute &&
       !onAuthRoute
     )
-      router.replace("/household-setup");
+      router.replace(Routes.HOUSEHOLD_SETUP);
     // Has a household but sits on setup: send home.
     else if (
       sessionUserId &&
       households.length > 0 &&
       onSetupRoute
     )
-      router.replace("/");
+      router.replace(Routes.HOME);
   }, [sessionUserId, initLoading, dataLoading, households, setupSkipped, dataError, current]);
 
   // Wait for session data too, so protected screens never paint homeless.
@@ -264,8 +265,11 @@ function CustomDrawerContent(props: DrawerContentComponentProps) {
 
   async function onLogout() {
     props.navigation.closeDrawer();
-    await signOut();
-    router.replace("/login");
+    try {
+      await signOut();
+    } finally {
+      router.replace(Routes.LOGIN);
+    }
   }
 
   return (
@@ -313,7 +317,7 @@ function CustomDrawerContent(props: DrawerContentComponentProps) {
           )}
           onPress={() => {
             props.navigation.closeDrawer();
-            router.push("/settings");
+            router.push(Routes.SETTINGS);
           }}
         />
       </View>

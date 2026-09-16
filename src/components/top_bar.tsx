@@ -1,8 +1,10 @@
 import { Pressable, Text, View, StyleSheet } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DrawerToggleButton } from "expo-router/drawer";
+import { router } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
+import { Routes } from "../global/constants";
 import { useAuth } from "../system/AuthProvider";
 
 export function TopBar() {
@@ -30,7 +32,11 @@ export function TopBar() {
         </View>
       </View>
 
-      <Pressable style={styles.avatar} accessibilityLabel="Profile">
+      <Pressable
+        style={styles.avatar}
+        accessibilityLabel="Profile"
+        onPress={() => router.push(Routes.SETTINGS)}
+      >
         <Ionicons name="person" size={20} color={Colors.primary} />
       </Pressable>
     </View>
