@@ -1,0 +1,195 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  createHousehold,
+  fetchHouseholdLogs,
+  fetchHouseholdMembers,
+  fetchHouseholdTasks,
+  fetchMyHouseholds,
+  fetchMyProfile,
+  joinHouseholdByCode,
+  leaveHousehold,
+  resolveEmailForUsername,
+  signInWithUsername,
+  signUpWithEmail,
+} from "../../src/system/db";
+import { ANA, BOB, CHARLIE, createSeed } from "../fake/seed";
+import { FakeClient } from "../fake/fake_supabase";
+
+let fake: FakeClient;
+let client: SupabaseClient;
+
+beforeEach(() => {
+  fake = new FakeClient(createSeed());
+  client = fake as unknown as SupabaseClient;
+});
+
+describe("signUpWithEmail", () => {
+  it("creates auth user, profile, and session", async () => {
+    const data = await signUpWithEmail(client, "dave@mail.com", "dave", "secret99");
+    expect(data.session?.user.id).toBeTruthy();
+    expect(fake.tables.profiles.find((p) => p.username === "dave")).toMatchObject({
+      email: "dave@mail.com",
+      points: 0,
+    });
+  });
+
+  it("validates before touching the backend", async () => {
+    await expect(signUpWithEmail(client, "bad", "dave", "secret99")).rejects.toThrow();
+    await expect(signUpWithEmail(client, "d@mail.com", "dave", "short")).rejects.toThrow();
+    expect(fake.calls.auth.signUp ?? 0).toBe(0);
+  });
+
+  it("maps duplicate emails to the friendly taken message", async () => {
+    await expect(signUpWithEmail(client, ANA.email, "someone", "secret99")).rejects.toThrow(
+      "That username is taken",
+    );
+  });
+
+  it("suffixes a taken username instead of failing", async () => {
+    const data = await signUpWithEmail(client, "new@mail.com", "ana", "secret99");
+    const created = fake.tables.profiles.find((p) => p.id === data.session!.user.id)!;
+    expect(created.username).not.toBe("ana");
+    expect(created.username.startsWith("ana")).toBe(true);
+  });
+});
+
+describe("signInWithUsername", () => {
+  it("resolves username to email, signs in, returns uid on 1 rpc + 0 selects", async () => {
+    fake.resetCalls();
+    const uid = await signInWithUsername(client, "ANA", "secret12");
+    expect(uid).toBe(ANA.id);
+    expect(fake.calls.rpc).toBe(1);
+    expect(fake.calls.select).toBe(0);
+  });
+
+  it("reports unknown users and wrong passwords generically", async () => {
+    await expect(signInWithUsername(client, "nobody", "whatever1")).rejects.toThrow(
+      "No account matches that username + password.",
+    );
+    await expect(signInWithUsername(client, "ana", "wrongpass")).rejects.toThrow(
+      "No account matches that username + password.",
+    );
+  });
+
+  it("validates before any backend call", async () => {
+    fake.resetCalls();
+    await expect(signInWithUsername(client, "ab", "secret12")).rejects.toThrow();
+    await expect(signInWithUsername(client, "ana", "")).rejects.toThrow("Type your password.");
+    expect(fake.calls.rpc).toBe(0);
+  });
+});
+
+describe("resolveEmailForUsername", () => {
+  it("finds case-insensitively", async () => {
+    await expect(resolveEmailForUsername(client, "  BOB ")).resolves.toBe(BOB.email);
+  });
+});
+
+describe("fetchMyProfile", () => {
+  it("returns the row, null for strangers", async () => {
+    await expect(fetchMyProfile(client, ANA.id)).resolves.toMatchObject({
+      username: "ana",
+      points: 250,
+      gems: 3,
+    });
+    await expect(fetchMyProfile(client, "user-ghost")).resolves.toBeNull();
+  });
+});
+
+describe("fetchMyHouseholds", () => {
+  it("returns memberships oldest first with nested households", async () => {
+    const homes = await fetchMyHouseholds(client, ANA.id);
+    expect(homes.map((h) => h.household.id)).toEqual([1, 2]);
+    expect(homes[0]).toMatchObject({ role: "owner" });
+    expect(homes[0].household).toMatchObject({ name: "Sunset Flat" });
+    await expect(fetchMyHouseholds(client, "user-ghost")).resolves.toEqual([]);
+  });
+});
+
+describe("household CRUD", () => {
+  it("validates names locally before any rpc", async () => {
+    fake.signInAs(CHARLIE.id);
+    await expect(createHousehold(client, " ")).rejects.toThrow("too short");
+    expect(fake.calls.rpc).toBe(0);
+  });
+
+  it("creates with caller as owner", async () => {
+    fake.signInAs(CHARLIE.id);
+    const home = await createHousehold(client, "Cabin Crew");
+    expect(home.name).toBe("Cabin Crew");
+    expect(home.invite_code).toHaveLength(12);
+    expect(
+      fake.tables.household_members.find(
+        (m) => m.household_id === home.id && m.profile_id === CHARLIE.id,
+      )?.role,
+    ).toBe("owner");
+  });
+
+  it("joins case-insensitively, rejects bad codes, rejoins idempotently", async () => {
+    fake.signInAs(CHARLIE.id);
+    const home = await joinHouseholdByCode(client, "sunset000001");
+    expect(home.id).toBe(1);
+    await expect(joinHouseholdByCode(client, "NOPE00000000")).rejects.toThrow(
+      "No household uses that code",
+    );
+    const before = fake.tables.household_members.length;
+    await joinHouseholdByCode(client, "SUNSET000001");
+    expect(fake.tables.household_members.length).toBe(before);
+  });
+
+  it("leave drops membership and frees the leaver's taken cards", async () => {
+    fake.signInAs(BOB.id);
+    await leaveHousehold(client, 1);
+    expect(
+      fake.tables.household_members.some(
+        (m) => m.household_id === 1 && m.profile_id === BOB.id,
+      ),
+    ).toBe(false);
+    expect(fake.tables.tasks.find((t) => t.id === 56)).toMatchObject({
+      status: "free",
+      owner: null,
+    });
+  });
+
+  it("last member out deletes the household", async () => {
+    fake.signInAs(BOB.id);
+    await leaveHousehold(client, 1); // bob leaves, ana remains
+    expect(fake.tables.households.some((h) => h.id === 1)).toBe(true);
+    fake.signInAs(ANA.id);
+    await leaveHousehold(client, 1); // ana leaves, empty now
+    expect(fake.tables.households.some((h) => h.id === 1)).toBe(false);
+    expect(fake.tables.tasks.some((t) => t.household_id === 1)).toBe(false);
+  });
+});
+
+describe("board fetches", () => {
+  it("pages tasks oldest-first, scoped to the household", async () => {
+    const tasks = await fetchHouseholdTasks(client, 1);
+    expect(tasks).toHaveLength(50);
+    expect(tasks[0].id).toBe(1);
+    expect(tasks.every((t) => t.household_id === 1)).toBe(true);
+    for (let i = 1; i < tasks.length; i++) {
+      expect(tasks[i].created_at >= tasks[i - 1].created_at).toBe(true);
+    }
+  });
+
+  it("caps logs newest-first at 30", async () => {
+    const logs = await fetchHouseholdLogs(client, 1);
+    expect(logs).toHaveLength(30);
+    expect(logs[0].id).toBe(35);
+    for (let i = 1; i < logs.length; i++) {
+      expect(logs[i].created_at <= logs[i - 1].created_at).toBe(true);
+    }
+  });
+
+  it("embeds public member profiles without emails", async () => {
+    const members = await fetchHouseholdMembers(client, 1);
+    expect(members.map((m) => m.profile_id).sort()).toEqual([ANA.id, BOB.id].sort());
+    expect(members[0]).toMatchObject({ role: "owner" });
+    for (const m of members) {
+      expect(m.profile).toBeDefined();
+      expect(m.profile).not.toHaveProperty("email");
+      expect(m.profile).toHaveProperty("username");
+    }
+  });
+});
