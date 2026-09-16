@@ -22,7 +22,15 @@ function clearEnv() {
   delete process.env.EXPO_PUBLIC_SUPABASE_KEY;
 }
 
+function stopCurrentClient() {
+  try {
+    (getSupabase()?.auth as any)?.stopAutoRefresh?.();
+  } catch {}
+  dropClient();
+}
+
 beforeEach(async () => {
+  stopCurrentClient();
   SECURE().clear();
   await AsyncStorage.clear();
   await clearBackendConfig();
@@ -30,7 +38,14 @@ beforeEach(async () => {
   clearEnv();
 });
 
+afterEach(() => {
+  // Real Supabase clients start unref'd auto-refresh timers; stop them so
+  // no interval/timeout survives the test, then drop the singleton.
+  stopCurrentClient();
+});
+
 afterAll(() => {
+  stopCurrentClient();
   Object.assign(process.env, OLD_ENV);
 });
 

@@ -10,6 +10,21 @@ let fake: FakeClient;
 const asClient = () => fake as unknown as SupabaseClient;
 const wrapper = ({ children }: any) => <AuthProvider>{children}</AuthProvider>;
 
+// Every renderHook mounts an AuthProvider with Fake realtime channels and
+// TanStack cache entries. Track them so afterEach can unmount + clear,
+// leaving no observers, channels, or gc/stale timers for the next test.
+const mounted: Array<{ unmount: () => void }> = [];
+
+function track<T extends { unmount: () => void }>(hook: T): T {
+  mounted.push(hook);
+  return hook;
+}
+
+async function flushNotifies() {
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+}
+
 beforeEach(() => {
   queryClient.clear();
   fake = new FakeClient(createSeed());
@@ -24,13 +39,25 @@ beforeEach(() => {
   jest.spyOn(supabaseModule, "getSupabase").mockImplementation(() => asClient());
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const m of mounted.splice(0)) {
+    try {
+      m.unmount();
+    } catch {}
+  }
+  // Flush any trailing notifyManager (setTimeout 0) updates inside act()
+  // so they never fire after the test.
+  await act(async () => {
+    await flushNotifies();
+  });
+  await queryClient.cancelQueries();
+  queryClient.clear();
   jest.restoreAllMocks();
 });
 
 describe("boot", () => {
   it("settles with no backend and no session", async () => {
-    const { result } = renderHook(() => useAuth(), { wrapper });
+    const { result } = track(renderHook(() => useAuth(), { wrapper }));
     await waitFor(() => expect(result.current.initLoading).toBe(false));
     expect(result.current.sessionUserId).toBeNull();
     expect(result.current.backendReady).toBe(false);
@@ -39,14 +66,14 @@ describe("boot", () => {
   it("restores an existing session from storage on boot", async () => {
     (supabaseModule.restoreBackend as jest.Mock).mockImplementation(async () => asClient());
     fake.signInAs(ANA.id);
-    const { result } = renderHook(() => useAuth(), { wrapper });
+    const { result } = track(renderHook(() => useAuth(), { wrapper }));
     await waitFor(() => expect(result.current.sessionUserId).toBe(ANA.id));
     await waitFor(() => expect(result.current.profile?.username).toBe("ana"));
     expect(result.current.households).toHaveLength(2);
   });
 
   it("connecting a backend flips readiness", async () => {
-    const { result } = renderHook(() => useAuth(), { wrapper });
+    const { result } = track(renderHook(() => useAuth(), { wrapper }));
     await waitFor(() => expect(result.current.initLoading).toBe(false));
     await act(async () => {
       await result.current.configureBackend("https://x.supabase.co", "k".repeat(40));
@@ -57,7 +84,7 @@ describe("boot", () => {
 
 describe("signIn", () => {
   it("loads profile, households, and active id on 1 rpc + 2 selects", async () => {
-    const { result } = renderHook(() => useAuth(), { wrapper });
+    const { result } = track(renderHook(() => useAuth(), { wrapper }));
     await waitFor(() => expect(result.current.initLoading).toBe(false));
     await act(async () => {
       await result.current.configureBackend("https://x.supabase.co", "k".repeat(40));
@@ -77,7 +104,7 @@ describe("signIn", () => {
   });
 
   it("rejects bad credentials without touching session state", async () => {
-    const { result } = renderHook(() => useAuth(), { wrapper });
+    const { result } = track(renderHook(() => useAuth(), { wrapper }));
     await waitFor(() => expect(result.current.initLoading).toBe(false));
     await act(async () => {
       await result.current.configureBackend("https://x.supabase.co", "k".repeat(40));
@@ -94,7 +121,7 @@ describe("signIn", () => {
 
 describe("live profile", () => {
   it("merges own UPDATEs with zero selects and ignores foreign rows", async () => {
-    const { result } = renderHook(() => useAuth(), { wrapper });
+    const { result } = track(renderHook(() => useAuth(), { wrapper }));
     await waitFor(() => expect(result.current.initLoading).toBe(false));
     await act(async () => {
       await result.current.configureBackend("https://x.supabase.co", "k".repeat(40));
@@ -107,6 +134,7 @@ describe("live profile", () => {
     fake.resetCalls();
     await act(async () => {
       fake.emit("profiles", "UPDATE", { id: ANA.id, points: 999, gems: 9 });
+      await flushNotifies();
     });
     await waitFor(() => expect(result.current.profile?.points).toBe(999));
     expect(result.current.profile?.gems).toBe(9);
@@ -115,6 +143,7 @@ describe("live profile", () => {
 
     await act(async () => {
       fake.emit("profiles", "UPDATE", { id: BOB.id, points: 1 });
+      await flushNotifies();
     });
     expect(result.current.profile?.points).toBe(999);
   });
@@ -122,7 +151,7 @@ describe("live profile", () => {
 
 describe("household mutations", () => {
   async function signedIn() {
-    const hook = renderHook(() => useAuth(), { wrapper });
+    const hook = track(renderHook(() => useAuth(), { wrapper }));
     await waitFor(() => expect(hook.result.current.initLoading).toBe(false));
     await act(async () => {
       await hook.result.current.configureBackend("https://x.supabase.co", "k".repeat(40));

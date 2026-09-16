@@ -15,6 +15,33 @@ import { ANA, BOB, createSeed } from "../fake/seed";
 let fake: FakeClient;
 let client: SupabaseClient;
 
+// TanStack's notifyManager batches observer notifications through
+// setTimeout(0), so a bare fake.emit() schedules a React update that fires
+// after act() exits -> act() warning. Flushing macrotasks inside act()
+// lets every scheduled notify settle while still inside act().
+async function flushNotifies() {
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+async function emitInAct(
+  table: string,
+  event: "INSERT" | "UPDATE" | "DELETE",
+  row: any,
+) {
+  await act(async () => {
+    fake.emit(table, event, row);
+    await flushNotifies();
+  });
+}
+
+async function setCacheInAct(fn: () => void) {
+  await act(async () => {
+    fn();
+    await flushNotifies();
+  });
+}
+
 const wrapper = ({ children }: any) => (
   <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
 );
@@ -39,6 +66,11 @@ beforeEach(() => {
   queryClient.clear();
   fake = new FakeClient(createSeed());
   client = fake as unknown as SupabaseClient;
+});
+
+afterEach(async () => {
+  await queryClient.cancelQueries();
+  queryClient.clear();
 });
 
 describe("subscription setup", () => {
@@ -81,19 +113,20 @@ describe("tasks channel", () => {
   }
 
   it("serves the initial page, then merges inserts/edits/deletes with 0 selects", async () => {
-    const { result } = useBoard();
+    const { result, unmount } = useBoard();
     await waitFor(() => expect(result.current.data).toHaveLength(50));
     fake.resetCalls();
 
-    await act(async () => {
-      fake.emit("tasks", "INSERT", taskRow(100, { created_at: "2026-07-01T00:00:00Z" }));
-    });
+    await emitInAct("tasks", "INSERT", taskRow(100, { created_at: "2026-07-01T00:00:00Z" }));
     let cached = queryClient.getQueryData<any[]>(qk.tasks(1))!;
     expect(cached).toHaveLength(51);
     expect(cached[cached.length - 1].id).toBe(100);
 
-    await act(async () => {
-      fake.emit("tasks", "UPDATE", { ...taskRow(5), points: 130, status: "taken", owner: BOB.id });
+    await emitInAct("tasks", "UPDATE", {
+      ...taskRow(5),
+      points: 130,
+      status: "taken",
+      owner: BOB.id,
     });
     cached = queryClient.getQueryData<any[]>(qk.tasks(1))!;
     expect(cached.find((t) => t.id === 5)).toMatchObject({
@@ -102,23 +135,26 @@ describe("tasks channel", () => {
       title: "Task 5",
     });
 
-    await act(async () => {
+    await emitInAct("tasks", "DELETE", {
       // Full old row, as REPLICA IDENTITY FULL delivers in production.
-      fake.emit("tasks", "DELETE", { ...taskRow(5), points: 130, status: "taken", owner: BOB.id });
+      ...taskRow(5),
+      points: 130,
+      status: "taken",
+      owner: BOB.id,
     });
     cached = queryClient.getQueryData<any[]>(qk.tasks(1))!;
     expect(cached.some((t) => t.id === 5)).toBe(false);
     expect(cached).toHaveLength(50);
     expect(fake.calls.select).toBe(0);
+    unmount();
   });
 
   it("ignores other households", async () => {
-    const { result } = useBoard();
+    const { result, unmount } = useBoard();
     await waitFor(() => expect(result.current.data).toHaveLength(50));
-    await act(async () => {
-      fake.emit("tasks", "INSERT", { ...taskRow(101), household_id: 2 });
-    });
+    await emitInAct("tasks", "INSERT", { ...taskRow(101), household_id: 2 });
     expect(queryClient.getQueryData<any[]>(qk.tasks(1))).toHaveLength(50);
+    unmount();
   });
 });
 
@@ -156,14 +192,12 @@ describe("logs channel", () => {
     const removes = fake.calls.removeChannel;
     expect(removes).toBeGreaterThan(0);
     fake.resetCalls();
-    await act(async () => {
-      fake.emit("activity_logs", "INSERT", {
-        id: 100,
-        household_id: 1,
-        owner: "ana",
-        details: "After blur",
-        created_at: "2026-09-01T00:00:00Z",
-      });
+    await emitInAct("activity_logs", "INSERT", {
+      id: 100,
+      household_id: 1,
+      owner: "ana",
+      details: "After blur",
+      created_at: "2026-09-01T00:00:00Z",
     });
     // Channel gone: nothing merged, nothing refetched.
     expect(queryClient.getQueryData<any[]>(qk.logs(1))).toHaveLength(30);
@@ -172,7 +206,7 @@ describe("logs channel", () => {
   });
 
   it("prepends newest and trims to the 30 cap", async () => {
-    const { result } = renderHook(
+    const { result, unmount } = renderHook(
       () => {
         const logs = useHouseholdLogs(client, 1);
         useLiveLogs(client, 1);
@@ -182,19 +216,18 @@ describe("logs channel", () => {
     );
     await waitFor(() => expect(result.current.data).toHaveLength(30));
     fake.resetCalls();
-    await act(async () => {
-      fake.emit("activity_logs", "INSERT", {
-        id: 100,
-        household_id: 1,
-        owner: "ana",
-        details: "Fresh",
-        created_at: "2026-09-01T00:00:00Z",
-      });
+    await emitInAct("activity_logs", "INSERT", {
+      id: 100,
+      household_id: 1,
+      owner: "ana",
+      details: "Fresh",
+      created_at: "2026-09-01T00:00:00Z",
     });
     const cached = queryClient.getQueryData<any[]>(qk.logs(1))!;
     expect(cached).toHaveLength(30);
     expect(cached[0].id).toBe(100);
     expect(fake.calls.select).toBe(0);
+    unmount();
   });
 });
 
@@ -211,31 +244,31 @@ describe("members channel", () => {
   }
 
   it("patches role edits and removes leavers with 0 selects", async () => {
-    const { result } = useMembers();
+    const { result, unmount } = useMembers();
     await waitFor(() => expect(result.current.data).toHaveLength(2));
     fake.resetCalls();
 
-    await act(async () => {
-      fake.emit("household_members", "UPDATE", {
-        household_id: 1,
-        profile_id: BOB.id,
-        role: "admin",
-        joined_at: "2026-01-01T00:00:12Z",
-      });
+    await emitInAct("household_members", "UPDATE", {
+      household_id: 1,
+      profile_id: BOB.id,
+      role: "admin",
+      joined_at: "2026-01-01T00:00:12Z",
     });
     let cached = queryClient.getQueryData<any[]>(qk.members(1))!;
     expect(cached.find((m) => m.profile_id === BOB.id)?.role).toBe("admin");
 
-    await act(async () => {
-      fake.emit("household_members", "DELETE", { household_id: 1, profile_id: BOB.id });
+    await emitInAct("household_members", "DELETE", {
+      household_id: 1,
+      profile_id: BOB.id,
     });
     cached = queryClient.getQueryData<any[]>(qk.members(1))!;
     expect(cached.map((m) => m.profile_id)).toEqual([ANA.id]);
     expect(fake.calls.select).toBe(0);
+    unmount();
   });
 
   it("refetches once on a fresh join to get the profile row", async () => {
-    const { result } = useMembers();
+    const { result, unmount } = useMembers();
     await waitFor(() => expect(result.current.data).toHaveLength(2));
     // The row must exist in the DB for the refetch to return it.
     fake.tables.household_members.push({
@@ -245,53 +278,55 @@ describe("members channel", () => {
       joined_at: "2026-08-01T00:00:00Z",
     });
     fake.resetCalls();
-    await act(async () => {
-      fake.emit("household_members", "INSERT", {
-        household_id: 1,
-        profile_id: "user-charlie",
-        role: "member",
-        joined_at: "2026-08-01T00:00:00Z",
-      });
+    await emitInAct("household_members", "INSERT", {
+      household_id: 1,
+      profile_id: "user-charlie",
+      role: "member",
+      joined_at: "2026-08-01T00:00:00Z",
     });
     await waitFor(() =>
       expect(
         queryClient.getQueryData<any[]>(qk.members(1))?.some((m) => m.profile_id === "user-charlie"),
       ).toBe(true),
     );
+    // Let the invalidated refetch's observer notification settle inside act().
+    await act(async () => {
+      await flushNotifies();
+    });
     expect(fake.calls.select).toBe(1);
     const joined = queryClient
       .getQueryData<any[]>(qk.members(1))!
       .find((m) => m.profile_id === "user-charlie")!;
     expect(joined.profile?.username).toBe("charlie");
+    unmount();
   });
 });
 
 describe("household meta channel", () => {
   it("patches renames and removes deleted homes from our list", async () => {
-    renderHook(() => useLiveHousehold(client, ANA.id, 1));
-    queryClient.setQueryData(qk.myHouseholds(ANA.id), [
-      {
-        role: "owner",
-        joined_at: "2026-01-01T00:00:11Z",
-        household: {
-          id: 1,
-          name: "Sunset Flat",
-          invite_code: "SUNSET000001",
-          created_by: ANA.id,
-          created_at: "2026-01-01T00:00:10Z",
-          check_at: null,
+    const { unmount } = renderHook(() => useLiveHousehold(client, ANA.id, 1));
+    await setCacheInAct(() =>
+      queryClient.setQueryData(qk.myHouseholds(ANA.id), [
+        {
+          role: "owner",
+          joined_at: "2026-01-01T00:00:11Z",
+          household: {
+            id: 1,
+            name: "Sunset Flat",
+            invite_code: "SUNSET000001",
+            created_by: ANA.id,
+            created_at: "2026-01-01T00:00:10Z",
+            check_at: null,
+          },
         },
-      },
-    ]);
-    await act(async () => {
-      fake.emit("households", "UPDATE", { id: 1, name: "Sunset Loft" });
-    });
+      ]),
+    );
+    await emitInAct("households", "UPDATE", { id: 1, name: "Sunset Loft" });
     expect(queryClient.getQueryData<any[]>(qk.myHouseholds(ANA.id))![0].household.name).toBe(
       "Sunset Loft",
     );
-    await act(async () => {
-      fake.emit("households", "DELETE", { id: 1 });
-    });
+    await emitInAct("households", "DELETE", { id: 1 });
     expect(queryClient.getQueryData<any[]>(qk.myHouseholds(ANA.id))).toEqual([]);
+    unmount();
   });
 });
