@@ -15,6 +15,21 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- Adds the kanban review lane. RUN THIS BLOCK ALONE FIRST if the dashboard
+-- complains: ALTER TYPE ... ADD VALUE cannot run inside a transaction
+-- block, and the dashboard runs whole files transactionally. Any direct
+-- Postgres connection (psql, TablePlus, DBeaver) runs it fine standalone.
+-- Safe to re-run: the guard skips it once the value exists.
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_enum
+    WHERE enumlabel = 'in_review'
+      AND enumtypid = 'task_status'::regtype
+  ) THEN
+    EXECUTE 'ALTER TYPE public.task_status ADD VALUE ''in_review''';
+  END IF;
+END $$;
+
 -- Profiles, one row per login user, built by the trigger below.
 CREATE TABLE IF NOT EXISTS profiles (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -52,10 +67,11 @@ CREATE INDEX IF NOT EXISTS idx_members_household ON household_members(household_
 CREATE INDEX IF NOT EXISTS idx_members_profile ON household_members(profile_id);
 
 -- Tasks, each belongs to exactly one household. Kanban rules: anyone
--- creates, anyone takes, the taker completes. Status moves via RPCs.
+-- creates, anyone takes, the taker completes, with an optional review
+-- lane (taken -> in_review) in between. Status moves via RPCs.
 CREATE TABLE IF NOT EXISTS tasks (
     id SERIAL PRIMARY KEY,
-    title VARCHAR(20) NOT NULL,
+    title VARCHAR(60) NOT NULL,
     description TEXT DEFAULT 'no description',
     difficulty task_difficulty NOT NULL DEFAULT 'easy',
     points INTEGER NOT NULL,
@@ -64,6 +80,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     owner UUID REFERENCES profiles(id) ON DELETE SET NULL,
     created_by UUID REFERENCES profiles(id) ON DELETE SET NULL DEFAULT auth.uid(),
     created_at TIMESTAMPTZ DEFAULT now(),
+    -- When the task was completed, for the weekly stats graph.
+    -- Nullable so existing rows are unaffected.
+    completed_at TIMESTAMPTZ,
 
     -- Points band per difficulty: easy 100-130, medium 200-260, hard 300-400.
     CONSTRAINT points_match_difficulty CHECK (
@@ -76,11 +95,54 @@ CREATE TABLE IF NOT EXISTS tasks (
     CONSTRAINT owner_matches_status CHECK (
         (status = 'free' AND owner IS NULL) OR
         (status = 'taken' AND owner IS NOT NULL) OR
+        (status = 'in_review' AND owner IS NOT NULL) OR
         (status = 'completed' AND owner IS NOT NULL)
     )
 );
+-- Allow the review lane on databases created before it. Drop-and-add is
+-- safe here: it only widens which (status, owner) pairs are legal and
+-- touches no rows. Requires the in_review enum value above to exist.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'owner_matches_status') THEN
+    ALTER TABLE public.tasks DROP CONSTRAINT owner_matches_status;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'owner_matches_status') THEN
+    ALTER TABLE public.tasks ADD CONSTRAINT owner_matches_status CHECK (
+        (status = 'free' AND owner IS NULL) OR
+        (status = 'taken' AND owner IS NOT NULL) OR
+        (status = 'in_review' AND owner IS NOT NULL) OR
+        (status = 'completed' AND owner IS NOT NULL)
+    );
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_tasks_household ON tasks(household_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+-- Backs the stats query (household + completion-week range scan).
+CREATE INDEX IF NOT EXISTS idx_tasks_household_completed ON tasks(household_id, completed_at);
+
+-- Adds completed_at on databases created before it. Nullable add,
+-- existing rows keep NULL and stay untouched.
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'tasks'
+      AND column_name = 'completed_at'
+  ) THEN
+    ALTER TABLE public.tasks ADD COLUMN completed_at TIMESTAMPTZ;
+  END IF;
+END $$;
+
+-- Widen titles on databases created before VARCHAR(60). Widening never
+-- touches existing data. Matches Lengths.TASK_TITLE in the app.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'tasks'
+      AND column_name = 'title' AND character_maximum_length < 60
+  ) THEN
+    ALTER TABLE public.tasks ALTER COLUMN title TYPE VARCHAR(60);
+  END IF;
+END $$;
 
 -- Activity log, scoped per household, capped at 30 rows each.
 CREATE TABLE IF NOT EXISTS activity_logs (
@@ -126,6 +188,13 @@ DO $$ BEGIN
     ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
   END IF;
 END $$;
+
+-- Full old rows on DELETE so household_id filters still match server-side.
+-- profiles/households filter on id (always present); household_members has
+-- a composite PK containing household_id; only tasks and activity_logs
+-- need this. Costs extra WAL per delete on these two tables.
+ALTER TABLE public.tasks REPLICA IDENTITY FULL;
+ALTER TABLE public.activity_logs REPLICA IDENTITY FULL;
 
 -- Triggers and functions.
 
@@ -334,13 +403,13 @@ BEGIN
     IF NOT is_household_member(target.household_id) THEN
         RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
     END IF;
-    IF target.owner IS DISTINCT FROM uid OR target.status != 'taken' THEN
-        RAISE EXCEPTION 'Task % cannot be completed by this user (not owned or not taken)', p_task_id
+    IF target.owner IS DISTINCT FROM uid OR target.status NOT IN ('taken', 'in_review') THEN
+        RAISE EXCEPTION 'Task % cannot be completed by this user (not owned, or not taken/under review)', p_task_id
             USING ERRCODE = 'P0001';
     END IF;
     UPDATE public.tasks
-    SET status = 'completed'
-    WHERE id = p_task_id AND owner = uid AND status = 'taken'
+    SET status = 'completed', completed_at = now()
+    WHERE id = p_task_id AND owner = uid AND status IN ('taken', 'in_review')
     RETURNING * INTO completed;
     IF completed IS NULL THEN
         RAISE EXCEPTION 'Task % was taken by someone else first', p_task_id USING ERRCODE = 'P0001';
@@ -349,6 +418,41 @@ BEGIN
     SET points = points + completed.points
     WHERE id = uid;
     RETURN completed;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Submits a taken task for review. Only the holder can submit, and only
+-- from taken: free cards have nothing to review, completed ones are done.
+-- Completing stays open from both taken and in_review, so review is a
+-- lane, not a gate.
+CREATE OR REPLACE FUNCTION submit_for_review(p_task_id INTEGER)
+RETURNS tasks AS $$
+DECLARE
+    submitted tasks;
+    uid UUID := auth.uid();
+BEGIN
+    IF uid IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated' USING ERRCODE = 'P0001';
+    END IF;
+    SELECT * INTO submitted FROM public.tasks WHERE id = p_task_id;
+    IF submitted IS NULL THEN
+        RAISE EXCEPTION 'Task % does not exist', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    IF NOT is_household_member(submitted.household_id) THEN
+        RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
+    END IF;
+    IF submitted.owner IS DISTINCT FROM uid OR submitted.status != 'taken' THEN
+        RAISE EXCEPTION 'Task % cannot be reviewed by this user (not owned or not taken)', p_task_id
+            USING ERRCODE = 'P0001';
+    END IF;
+    UPDATE public.tasks
+    SET status = 'in_review'
+    WHERE id = p_task_id AND owner = uid AND status = 'taken'
+    RETURNING * INTO submitted;
+    IF submitted IS NULL THEN
+        RAISE EXCEPTION 'Task % changed before it could be reviewed', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    RETURN submitted;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
@@ -458,6 +562,10 @@ END;
 $$ LANGUAGE plpgsql SET search_path = public;
 
 DO $$ BEGIN
+  -- ORDER MATTERS: same-timing triggers fire in name order, so
+  -- trg_guard_owner_removal (g) runs before trg_release_tasks_on_leave
+  -- (r) below. A blocked removal must never release tasks first.
+  -- Keep these names in this alphabetical order if renamed.
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_guard_owner_removal') THEN
     CREATE TRIGGER trg_guard_owner_removal
     BEFORE DELETE ON household_members
@@ -465,7 +573,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
--- Frees the taken tasks of a departing member so others can take them.
+-- Frees the held tasks of a departing member so others can take them.
 -- Completed work is untouched. Runs on leaves and kicks alike.
 CREATE OR REPLACE FUNCTION release_tasks_on_leave()
 RETURNS TRIGGER AS $$
@@ -473,7 +581,7 @@ BEGIN
     UPDATE public.tasks SET status = 'free', owner = NULL
     WHERE household_id = OLD.household_id
       AND owner = OLD.profile_id
-      AND status = 'taken';
+      AND status IN ('taken', 'in_review');
     INSERT INTO public.activity_logs (household_id, owner, details)
     VALUES (
         OLD.household_id,
@@ -640,6 +748,7 @@ REVOKE ALL ON FUNCTION join_household_by_code(TEXT) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION leave_household(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION claim_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION complete_task(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION submit_for_review(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION get_household_logs(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION log_activity(INTEGER, TEXT) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION get_email_for_username(TEXT) FROM PUBLIC;
@@ -650,6 +759,7 @@ GRANT EXECUTE ON FUNCTION join_household_by_code(TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION leave_household(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION claim_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION complete_task(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION submit_for_review(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_household_logs(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION log_activity(INTEGER, TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_email_for_username(TEXT) TO anon, authenticated;
