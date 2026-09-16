@@ -7,6 +7,9 @@ export type FakeCalls = {
   select: number;
   rpc: number;
   upsert: number;
+  update: number;
+  storageUpload: number;
+  signedUrl: number;
   subscribe: number;
   removeChannel: number;
   auth: Record<string, number>;
@@ -68,6 +71,8 @@ class FakeQuery {
   private cols: string | null = null;
   private upsertRow: any = null;
   private upsertKeys: string[] = [];
+  private updatePatch: any = null;
+  private isUpdate = false;
 
   constructor(
     private fake: FakeClient,
@@ -103,6 +108,12 @@ class FakeQuery {
   upsert(row: any, opts?: { onConflict?: string }) {
     this.upsertRow = row;
     this.upsertKeys = (opts?.onConflict ?? "").split(",").map((s) => s.trim());
+    return this;
+  }
+
+  update(patch: any) {
+    this.updatePatch = patch;
+    this.isUpdate = true;
     return this;
   }
 
@@ -162,12 +173,42 @@ class FakeQuery {
     return { data: [this.upsertRow], error: null };
   }
 
+  private runUpdate() {
+    this.fake.calls.update++;
+    const rows = (this.fake.tables[this.table] as any[]).filter((r) =>
+      this.filters.every(([col, val]) => r[col] === val),
+    );
+    // Mirrors the profiles_username_key unique constraint.
+    if (
+      this.table === "profiles" &&
+      this.updatePatch.username != null &&
+      (this.fake.tables.profiles as any[]).some(
+        (r) => r.username === this.updatePatch.username && !rows.includes(r),
+      )
+    ) {
+      return {
+        data: null,
+        error: {
+          message: 'duplicate key value violates unique constraint "profiles_username_key"',
+        },
+      };
+    }
+    for (const r of rows) Object.assign(r, this.updatePatch);
+    return { data: rows, error: null };
+  }
+
   then(
     resolve: (v: any) => void,
     reject?: (e: any) => void,
   ): Promise<any> {
     try {
-      resolve(this.upsertRow ? this.runUpsert() : this.runSelect());
+      resolve(
+        this.upsertRow
+          ? this.runUpsert()
+          : this.isUpdate
+            ? this.runUpdate()
+            : this.runSelect(),
+      );
     } catch (e) {
       if (reject) reject(e);
       else throw e;
@@ -230,6 +271,9 @@ export class FakeClient {
     select: 0,
     rpc: 0,
     upsert: 0,
+    update: 0,
+    storageUpload: 0,
+    signedUrl: 0,
     subscribe: 0,
     removeChannel: 0,
     auth: {},
@@ -261,11 +305,49 @@ export class FakeClient {
     onAuthStateChange: (cb: (event: string, session: any) => void) => any;
   };
 
+  // In-memory object storage, keyed by "bucket/path".
+  // Set storageError to make the next upload fail once.
+  storageFiles = new Map<string, { blob: any; contentType?: string }>();
+  storageError: string | null = null;
+
+  storage = {
+    from: (bucket: string) => ({
+      upload: async (path: string, blob: any, opts?: any) => {
+        this.calls.storageUpload++;
+        if (this.storageError) {
+          const message = this.storageError;
+          this.storageError = null;
+          return { data: null, error: { message } };
+        }
+        this.storageFiles.set(`${bucket}/${path}`, {
+          blob,
+          contentType: opts?.contentType,
+        });
+        return { data: { path }, error: null };
+      },
+      createSignedUrl: async (path: string, expiresIn: number) => {
+        this.calls.signedUrl++;
+        if (!this.storageFiles.has(`${bucket}/${path}`)) {
+          return { data: null, error: { message: "Object not found" } };
+        }
+        return {
+          data: {
+            signedUrl: `https://fake.storage/${bucket}/${path}?e=${expiresIn}`,
+          },
+          error: null,
+        };
+      },
+    }),
+  };
+
   resetCalls() {
     this.calls = {
       select: 0,
       rpc: 0,
       upsert: 0,
+      update: 0,
+      storageUpload: 0,
+      signedUrl: 0,
       subscribe: 0,
       removeChannel: 0,
       auth: {},

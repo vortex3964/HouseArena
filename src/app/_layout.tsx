@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import {
   ActivityIndicator,
+  Pressable,
+  Text,
   View,
   useWindowDimensions,
 } from "react-native";
@@ -20,7 +22,9 @@ import { Colors } from "../global/theme";
 import { Routes } from "../global/constants";
 import { TopBar } from "../components/top_bar";
 import { ErrorBanner, PrimaryButton } from "../components/auth_ui";
+import { AvatarImage } from "../components/AvatarImage";
 import { AuthProvider, useAuth } from "../system/AuthProvider";
+import { useAvatarUrl } from "../system/avatars";
 import { queryClient } from "../system/db";
 import { useLiveHousehold } from "../system/live";
 import { setupNotificationHandler } from "../system/push";
@@ -253,6 +257,13 @@ function AppDrawer() {
             title: "Settings",
           }}
         />
+        <Drawer.Screen
+          name="profile"
+          options={{
+            drawerItemStyle: { display: "none" },
+            title: "Profile",
+          }}
+        />
       </Drawer>
     </GestureHandlerRootView>
   );
@@ -260,8 +271,14 @@ function AppDrawer() {
 
 // Drawer list plus pinned Logout and Settings buttons at the bottom.
 function CustomDrawerContent(props: DrawerContentComponentProps) {
-  const { signOut } = useAuth();
+  const { signOut, profile, client } = useAuth();
   const active = props.state.routeNames[props.state.index];
+  const avatarUrl = useAvatarUrl(client, profile?.avatar_url ?? null);
+
+  function openProfile() {
+    props.navigation.closeDrawer();
+    router.push(Routes.PROFILE);
+  }
 
   async function onLogout() {
     props.navigation.closeDrawer();
@@ -274,6 +291,34 @@ function CustomDrawerContent(props: DrawerContentComponentProps) {
 
   return (
     <View style={{ flex: 1, backgroundColor: Colors.mantle }}>
+      <Pressable
+        onPress={openProfile}
+        accessibilityLabel="Open profile"
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 12,
+          paddingHorizontal: 16,
+          paddingTop: 20,
+          paddingBottom: 12,
+        }}
+      >
+        <AvatarImage uri={avatarUrl} size={56} />
+        <View style={{ flex: 1 }}>
+          <Text
+            style={{ color: Colors.text, fontSize: 17, fontWeight: "800" }}
+            numberOfLines={1}
+          >
+            {profile?.username ?? "…"}
+          </Text>
+          <Text
+            style={{ color: Colors.subtext0, fontSize: 13 }}
+            numberOfLines={1}
+          >
+            {profile?.email ?? ""}
+          </Text>
+        </View>
+      </Pressable>
       <DrawerContentScrollView
         {...props}
         contentContainerStyle={{

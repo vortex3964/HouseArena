@@ -53,6 +53,7 @@ export const Routes = {
   REGISTER: "/register",
   HOUSEHOLD_SETUP: "/household-setup",
   SETTINGS: "/settings",
+  PROFILE: "/profile",
 } as const;
 
 export const Messages = {

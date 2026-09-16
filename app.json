@@ -7,6 +7,11 @@
     "icon": "./assets/images/appImages/logo.png",
     "scheme": "housearena",
     "userInterfaceStyle": "automatic",
+    "ios": {
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "HouseArena needs photo library access so you can set a profile picture."
+      }
+    },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#0D0A18",

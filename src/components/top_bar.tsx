@@ -6,11 +6,14 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
 import { Routes } from "../global/constants";
 import { useAuth } from "../system/AuthProvider";
+import { useAvatarUrl } from "../system/avatars";
+import { AvatarImage } from "./AvatarImage";
 
 export function TopBar() {
   const insets = useSafeAreaInsets();
   // Live values from the realtime profile subscription, null until loaded.
-  const { profile } = useAuth();
+  const { profile, client } = useAuth();
+  const avatarUrl = useAvatarUrl(client, profile?.avatar_url ?? null);
 
   return (
     <View style={[styles.bar, { paddingTop: insets.top }]}>
@@ -33,11 +36,11 @@ export function TopBar() {
       </View>
 
       <Pressable
-        style={styles.avatar}
+        style={styles.avatarPress}
         accessibilityLabel="Profile"
-        onPress={() => router.push(Routes.SETTINGS)}
+        onPress={() => router.push(Routes.PROFILE)}
       >
-        <Ionicons name="person" size={20} color={Colors.primary} />
+        <AvatarImage uri={avatarUrl} size={38} />
       </Pressable>
     </View>
   );
@@ -71,15 +74,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   count: { color: Colors.text, fontWeight: "700" },
-  avatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 999,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: Colors.surface0,
-    borderWidth: 2,
-    borderColor: Colors.primary,
+  avatarPress: {
     marginRight: 8,
   },
 });
