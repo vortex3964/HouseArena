@@ -279,7 +279,7 @@ describe("household meta channel", () => {
           invite_code: "SUNSET000001",
           created_by: ANA.id,
           created_at: "2026-01-01T00:00:10Z",
-          check_date: null,
+          check_at: null,
         },
       },
     ]);

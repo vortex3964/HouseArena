@@ -52,8 +52,35 @@ CREATE TABLE IF NOT EXISTS households (
     invite_code TEXT NOT NULL UNIQUE DEFAULT upper(substr(encode(gen_random_bytes(9), 'hex'), 1, 12)),
     created_by UUID REFERENCES profiles(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ DEFAULT now(),
-    check_date DATE
+    check_at TIMESTAMPTZ
 );
+
+-- Backfill for databases created with check_date DATE: existing slots
+-- land on their upcoming Sunday at the default hour, then the old
+-- column goes away. Idempotent, only touches rows missing check_at.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'households'
+      AND column_name = 'check_date'
+  ) THEN
+    UPDATE public.households
+    SET check_at = sunday
+    FROM (
+      SELECT id,
+        CASE WHEN slot <= now() THEN slot + INTERVAL '7 days' ELSE slot END AS sunday
+      FROM (
+        SELECT id,
+          date_trunc('week', COALESCE(check_date, CURRENT_DATE)::timestamptz)
+            + INTERVAL '6 days 20 hours' AS slot
+        FROM public.households
+        WHERE check_at IS NULL
+      ) t
+    ) s
+    WHERE households.id = s.id;
+    ALTER TABLE public.households DROP COLUMN check_date;
+  END IF;
+END $$;
 
 -- Membership, lets one user belong to many households.
 CREATE TABLE IF NOT EXISTS household_members (
@@ -198,21 +225,32 @@ ALTER TABLE public.activity_logs REPLICA IDENTITY FULL;
 
 -- Triggers and functions.
 
--- Sets household check_date to 7 days after creation.
-CREATE OR REPLACE FUNCTION set_household_check_date()
+-- New households wait for the upcoming Sunday at the default hour.
+-- A Monday creation checks that Sunday, never the Monday after.
+CREATE OR REPLACE FUNCTION set_household_check()
 RETURNS TRIGGER AS $$
+DECLARE
+    slot TIMESTAMPTZ;
 BEGIN
-    NEW.check_date := (CURRENT_DATE + INTERVAL '7 days')::DATE;
+    -- date_trunc week starts Monday, so Sunday is +6 days at 20:00.
+    slot := date_trunc('week', NEW.created_at) + INTERVAL '6 days 20 hours';
+    IF slot <= NEW.created_at THEN
+        slot := slot + INTERVAL '7 days';
+    END IF;
+    NEW.check_at := slot;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_set_household_check_date ON public.households;
+DROP FUNCTION IF EXISTS set_household_check_date();
+
 DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_set_household_check_date') THEN
-    CREATE TRIGGER trg_set_household_check_date
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_set_household_check') THEN
+    CREATE TRIGGER trg_set_household_check
     BEFORE INSERT ON households
     FOR EACH ROW
-    EXECUTE FUNCTION set_household_check_date();
+    EXECUTE FUNCTION set_household_check();
   END IF;
 END $$;
 
@@ -348,6 +386,125 @@ BEGIN
     ) THEN
         DELETE FROM public.households WHERE id = p_household_id;
     END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Weekly household check, one atomic transaction per household.
+-- Winners (top score, ties share it, even at 0) take +1 gem and +1 win.
+-- Members below 85% of the top score take +1 strike each; the wipe
+-- at 3 strikes applies on its own. Completed tasks older than last
+-- week are pruned so the stats graph keeps two full weeks; open,
+-- taken, and in-review cards are never touched. The slot advances
+-- exactly 7 days so the check stays on Sundays.
+CREATE OR REPLACE FUNCTION run_weekly_check(p_household_id INTEGER)
+RETURNS void AS $$
+DECLARE
+    home households%ROWTYPE;
+    top INTEGER;
+    winner_names TEXT;
+    cutoff TIMESTAMPTZ;
+BEGIN
+    SELECT * INTO home FROM public.households WHERE id = p_household_id FOR UPDATE;
+    IF home IS NULL THEN
+        RETURN;
+    END IF;
+
+    SELECT COALESCE(MAX(points), 0) INTO top
+    FROM public.profiles p
+    JOIN public.household_members m ON m.profile_id = p.id
+    WHERE m.household_id = p_household_id;
+
+    UPDATE public.profiles p
+    SET gems = gems + 1,
+        wins = wins + 1
+    FROM public.household_members m
+    WHERE m.household_id = p_household_id
+      AND m.profile_id = p.id
+      AND p.points = top;
+
+    UPDATE public.profiles p
+    SET strikes = strikes + 1
+    FROM public.household_members m
+    WHERE m.household_id = p_household_id
+      AND m.profile_id = p.id
+      AND p.points < top * 0.85;
+
+    SELECT string_agg(username, ', ' ORDER BY username) INTO winner_names
+    FROM public.profiles p
+    JOIN public.household_members m ON m.profile_id = p.id
+    WHERE m.household_id = p_household_id AND p.points = top;
+
+    INSERT INTO public.activity_logs (household_id, owner, details)
+    VALUES (
+        p_household_id,
+        NULL,
+        'Weekly check: ' || COALESCE(winner_names, 'nobody') || ' takes the win.'
+    );
+
+    cutoff := date_trunc('week', now() - INTERVAL '1 week');
+    DELETE FROM public.tasks
+    WHERE household_id = p_household_id
+      AND status = 'completed'
+      AND completed_at IS NOT NULL
+      AND completed_at < cutoff;
+
+    IF home.check_at IS NULL THEN
+        home.check_at := date_trunc('week', now()) + INTERVAL '6 days 20 hours';
+    END IF;
+    WHILE home.check_at <= now() LOOP
+        home.check_at := home.check_at + INTERVAL '7 days';
+    END LOOP;
+    UPDATE public.households SET check_at = home.check_at WHERE id = p_household_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Runs every due check. One bad household never aborts the batch.
+-- Fired every 15 minutes by cron, which doubles as the DB keep-alive.
+CREATE OR REPLACE FUNCTION run_due_checks()
+RETURNS void AS $$
+DECLARE
+    hid INTEGER;
+BEGIN
+    FOR hid IN
+        SELECT id FROM public.households WHERE check_at <= now()
+    LOOP
+        BEGIN
+            PERFORM run_weekly_check(hid);
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'weekly check failed for household %: %', hid, SQLERRM;
+        END;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Lets any member move the weekly slot. Only the time is configurable:
+-- the slot is always the upcoming Sunday at that hour and minute.
+CREATE OR REPLACE FUNCTION set_check_time(p_household_id INTEGER, p_hour INTEGER, p_minute INTEGER)
+RETURNS households AS $$
+DECLARE
+    home households;
+    slot TIMESTAMPTZ;
+BEGIN
+    IF p_hour IS NULL OR p_minute IS NULL
+        OR p_hour < 0 OR p_hour > 23 OR p_minute < 0 OR p_minute > 59 THEN
+        RAISE EXCEPTION 'Pick a valid time' USING ERRCODE = 'P0001';
+    END IF;
+    SELECT * INTO home FROM public.households WHERE id = p_household_id;
+    IF home IS NULL THEN
+        RAISE EXCEPTION 'Household % does not exist', p_household_id USING ERRCODE = 'P0001';
+    END IF;
+    IF NOT is_household_member(p_household_id) THEN
+        RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
+    END IF;
+    slot := date_trunc('week', now())
+        + INTERVAL '6 days'
+        + make_interval(hours => p_hour, mins => p_minute);
+    IF slot <= now() THEN
+        slot := slot + INTERVAL '7 days';
+    END IF;
+    UPDATE public.households SET check_at = slot WHERE id = p_household_id
+    RETURNING * INTO home;
+    RETURN home;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
@@ -736,7 +893,7 @@ END $$;
 REVOKE ALL ON FUNCTION decay_strikes() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION prune_activity_logs() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION apply_strike_penalty() FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION set_household_check_date() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION set_household_check() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION handle_new_user() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION block_currency_selfwrite() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION guard_owner_removal() FROM PUBLIC, anon, authenticated;
@@ -749,6 +906,9 @@ REVOKE ALL ON FUNCTION leave_household(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION claim_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION complete_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION submit_for_review(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION run_weekly_check(INTEGER) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION run_due_checks() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION get_household_logs(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION log_activity(INTEGER, TEXT) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION get_email_for_username(TEXT) FROM PUBLIC;
@@ -760,6 +920,7 @@ GRANT EXECUTE ON FUNCTION leave_household(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION claim_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION complete_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION submit_for_review(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_household_logs(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION log_activity(INTEGER, TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_email_for_username(TEXT) TO anon, authenticated;
@@ -830,4 +991,18 @@ SELECT cron.schedule(
   '0 * * * *',
   $$DELETE FROM public.password_reset_codes WHERE expires_at < now();
     DELETE FROM public.password_reset_requests WHERE created_at < now() - interval '1 hour';$$
+);
+
+-- Fires due weekly checks. Every 15 minutes keeps checks punctual and
+-- doubles as the DB keep-alive, so no reminder system is needed.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'run-due-checks') THEN
+    PERFORM cron.unschedule('run-due-checks');
+  END IF;
+END $$;
+
+SELECT cron.schedule(
+  'run-due-checks',
+  '*/15 * * * *',
+  $$SELECT public.run_due_checks();$$
 );

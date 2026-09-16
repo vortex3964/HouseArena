@@ -39,7 +39,7 @@ export function createSeed(): FakeDb {
       invite_code: "SUNSET000001",
       created_by: ANA.id,
       created_at: iso(T0, 10),
-      check_date: null,
+      check_at: null,
     },
     {
       id: 2,
@@ -47,7 +47,7 @@ export function createSeed(): FakeDb {
       invite_code: "BEACH0000002",
       created_by: BOB.id,
       created_at: iso(T0, 20),
-      check_date: null,
+      check_at: null,
     },
   );
   db.household_members.push(

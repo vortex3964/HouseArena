@@ -8,8 +8,10 @@ import {
   View,
 } from "react-native";
 import Ionicons from "@expo/vector-icons/Ionicons";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import * as Clipboard from "expo-clipboard";
 import { useAuth } from "../system/AuthProvider";
+import { setCheckTime } from "../system/db";
 import {
   getBackendConfigSync,
   getDevPrefill,
@@ -38,6 +40,11 @@ export default function Settings() {
   const [pwMsg, setPwMsg] = useState<string | null>(null);
   const [pwError, setPwError] = useState<string | null>(null);
   const [changing, setChanging] = useState(false);
+  const [draftTime, setDraftTime] = useState(() => new Date());
+  const [showPicker, setShowPicker] = useState(false);
+  const [checkMsg, setCheckMsg] = useState<string | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [savingCheck, setSavingCheck] = useState(false);
 
   // Saved backend values, same ones typed during register.
   // Falls back to the live client config and dev prefill, so this
@@ -62,6 +69,49 @@ export default function Settings() {
   async function copy(label: string, text: string) {
     await Clipboard.setStringAsync(text);
     setCopied(label);
+  }
+
+  const checkAt = activeHousehold?.household.check_at ?? null;
+
+  function formatSlot(iso: string): string {
+    const d = new Date(iso);
+    const day = d.toLocaleDateString([], {
+      weekday: "long",
+      month: "short",
+      day: "numeric",
+    });
+    const time = d.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    return `${day} at ${time}`;
+  }
+
+  // Saves the picked time. The server pins the slot to the upcoming
+  // Sunday, then the household list is reloaded so every screen agrees.
+  async function onSaveCheckTime() {
+    setCheckMsg(null);
+    setCheckError(null);
+    const home = activeHousehold?.household;
+    if (!client || !home) {
+      setCheckError("Join or create a household first.");
+      return;
+    }
+    setSavingCheck(true);
+    try {
+      await setCheckTime(
+        client,
+        home.id,
+        draftTime.getHours(),
+        draftTime.getMinutes(),
+      );
+      await refreshSessionData();
+      setCheckMsg("Check time saved.");
+    } catch (e) {
+      setCheckError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingCheck(false);
+    }
   }
 
   // Swaps to a new password while logged in, for after a temp login.
@@ -183,6 +233,62 @@ export default function Settings() {
               </Text>
               <Ionicons name="copy" size={20} color={Colors.primary} />
             </Pressable>
+          </>
+        ) : (
+          <Text style={styles.hint}>
+            {households.length === 0
+              ? "Join or create a household first."
+              : "No active household selected."}
+          </Text>
+        )}
+      </View>
+
+      <View style={styles.card}>
+        <View style={styles.row}>
+          <Ionicons name="calendar" size={18} color={Colors.secondary} />
+          <Text style={styles.cardTitle}>Weekly check</Text>
+        </View>
+        {activeHousehold ? (
+          <>
+            <Text style={styles.hint}>
+              {checkAt
+                ? `Next check for ${activeHousehold.household.name}: ${formatSlot(checkAt)}. Winner takes a gem, under 85% takes a strike.`
+                : "No check scheduled yet."}
+            </Text>
+            <Pressable
+              style={styles.valueRow}
+              onPress={() => {
+                if (checkAt) setDraftTime(new Date(checkAt));
+                setShowPicker((s) => !s);
+              }}
+            >
+              <Ionicons name="time" size={18} color={Colors.muted} />
+              <Text style={styles.value}>
+                {draftTime.toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </Text>
+              <Ionicons name="chevron-down" size={18} color={Colors.muted} />
+            </Pressable>
+            {showPicker && (
+              <DateTimePicker
+                value={draftTime}
+                mode="time"
+                is24Hour
+                display="default"
+                onChange={(_event, date) => {
+                  if (date) setDraftTime(date);
+                }}
+              />
+            )}
+            <ErrorBanner message={checkError} />
+            {checkMsg ? <Text style={styles.copied}>{checkMsg}</Text> : null}
+            <PrimaryButton
+              title="Save check time"
+              onPress={onSaveCheckTime}
+              loading={savingCheck}
+            />
           </>
         ) : (
           <Text style={styles.hint}>

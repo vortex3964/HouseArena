@@ -12,7 +12,7 @@ const homes: MyHousehold[] = [
       invite_code: "SUNSET000001",
       created_by: "user-ana",
       created_at: "2026-01-01T00:00:01Z",
-      check_date: null,
+      check_at: null,
     },
   },
   {
@@ -24,7 +24,7 @@ const homes: MyHousehold[] = [
       invite_code: "BEACH0000002",
       created_by: "user-bob",
       created_at: "2026-01-01T00:00:02Z",
-      check_date: null,
+      check_at: null,
     },
   },
 ];

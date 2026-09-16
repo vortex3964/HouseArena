@@ -198,6 +198,32 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
+// Upcoming Sunday at hour:minute UTC, strictly in the future.
+// Mirrors the Sunday-slot rule in set_check_time and the trigger.
+export function upcomingSunday(hour: number, minute: number, from = new Date()): Date {
+  const days = (7 - from.getUTCDay()) % 7;
+  const slot = new Date(
+    Date.UTC(
+      from.getUTCFullYear(),
+      from.getUTCMonth(),
+      from.getUTCDate() + days,
+      hour,
+      minute,
+    ),
+  );
+  if (slot.getTime() <= from.getTime()) {
+    return new Date(slot.getTime() + 7 * 86400_000);
+  }
+  return slot;
+}
+
+// Monday 00:00 UTC of the given date's week. Mirrors date_trunc('week').
+export function mondayOf(d: Date): Date {
+  const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const back = (new Date(midnight).getUTCDay() + 6) % 7;
+  return new Date(midnight - back * 86400_000);
+}
+
 export class FakeClient {
   tables: FakeDb;
   calls: FakeCalls = {
@@ -359,7 +385,7 @@ export class FakeClient {
           invite_code: `INV${String(id).padStart(9, "0")}`,
           created_by: this.currentUserId,
           created_at: nowIso(),
-          check_date: null,
+          check_at: upcomingSunday(20, 0).toISOString(),
         };
         this.tables.households.push(home);
         this.tables.household_members.push({
@@ -471,9 +497,105 @@ export class FakeClient {
         this.tables.activity_logs.push(entry);
         return { data: entry, error: null };
       }
+      case "set_check_time": {
+        const hid = params.p_household_id;
+        const hour = params.p_hour;
+        const minute = params.p_minute;
+        if (
+          hour == null ||
+          minute == null ||
+          !Number.isInteger(hour) ||
+          !Number.isInteger(minute) ||
+          hour < 0 ||
+          hour > 23 ||
+          minute < 0 ||
+          minute > 59
+        ) {
+          return { data: null, error: { message: "Pick a valid time" } };
+        }
+        const home = this.tables.households.find((h) => h.id === hid);
+        if (!home) {
+          return { data: null, error: { message: `Household ${hid} does not exist` } };
+        }
+        if (
+          !this.tables.household_members.some(
+            (m) => m.household_id === hid && m.profile_id === this.currentUserId,
+          )
+        ) {
+          return { data: null, error: { message: "Not a member of this household" } };
+        }
+        home.check_at = upcomingSunday(hour, minute).toISOString();
+        return { data: { ...home }, error: null };
+      }
+      case "run_weekly_check": {
+        this.runWeekly(params.p_household_id);
+        return { data: null, error: null };
+      }
+      case "run_due_checks": {
+        const now = Date.now();
+        for (const h of this.tables.households) {
+          if (h.check_at && new Date(h.check_at).getTime() <= now) {
+            this.runWeekly(h.id);
+          }
+        }
+        return { data: null, error: null };
+      }
       default:
         return { data: null, error: { message: `unknown rpc ${name}` } };
     }
+  }
+
+  // Twin of run_weekly_check: winners take gems+wins even at 0, below
+  // 85% of the top takes a strike, old completed tasks are pruned,
+  // and the slot advances exactly 7 days with overdue catch-up.
+  private runWeekly(hid: number) {
+    const home = this.tables.households.find((h) => h.id === hid);
+    if (!home) return;
+    const memberIds = new Set(
+      this.tables.household_members
+        .filter((m) => m.household_id === hid)
+        .map((m) => m.profile_id),
+    );
+    const members = this.tables.profiles.filter((p) => memberIds.has(p.id));
+    const top = members.reduce((max, p) => Math.max(max, p.points), 0);
+    for (const p of members) {
+      if (p.points === top) {
+        p.gems += 1;
+        p.wins += 1;
+      }
+      if (p.points < top * 0.85) {
+        p.strikes += 1;
+      }
+    }
+    const winners = members
+      .filter((p) => p.points === top)
+      .map((p) => p.username)
+      .sort();
+    this.tables.activity_logs.push({
+      id: this.tables.nextIds.log++,
+      household_id: hid,
+      owner: null,
+      details: `Weekly check: ${winners.length ? winners.join(", ") : "nobody"} takes the win.`,
+      created_at: new Date().toISOString(),
+    });
+    const cutoff = mondayOf(new Date(Date.now() - 7 * 86400_000)).getTime();
+    this.tables.tasks = this.tables.tasks.filter(
+      (t) =>
+        !(
+          t.household_id === hid &&
+          t.status === "completed" &&
+          t.completed_at &&
+          new Date(t.completed_at).getTime() < cutoff
+        ),
+    );
+    let slot = home.check_at ? new Date(home.check_at).getTime() : NaN;
+    if (!Number.isFinite(slot)) {
+      slot = upcomingSunday(20, 0).getTime();
+    }
+    while (slot <= Date.now()) {
+      slot += 7 * 86400_000;
+    }
+    home.check_at = new Date(slot).toISOString();
   }
 
   channel(name: string): FakeChannel {

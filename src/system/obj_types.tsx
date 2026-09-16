@@ -37,7 +37,7 @@ export type Household = {
   invite_code: string;
   created_by: string | null;
   created_at: string;
-  check_date: string | null;
+  check_at: string | null;
 };
 
 export type HouseholdMember = {

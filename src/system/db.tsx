@@ -131,7 +131,7 @@ export async function fetchMyHouseholds(
   const { data, error } = await client
     .from("household_members")
     .select(
-      "role,joined_at,household:households(id,name,invite_code,created_by,created_at,check_date)",
+      "role,joined_at,household:households(id,name,invite_code,created_by,created_at,check_at)",
     )
     .eq("profile_id", userId)
     .order("joined_at", { ascending: true });
@@ -188,6 +188,33 @@ export async function leaveHousehold(
     p_household_id: householdId,
   });
   if (error) throw new Error(error.message);
+}
+
+// Moves the weekly check slot. Only the time of day is configurable,
+// the server pins it to the upcoming Sunday. Hour and minute are
+// range-checked here so typos fail fast with a friendly error.
+export async function setCheckTime(
+  client: SupabaseClient,
+  householdId: number,
+  hour: number,
+  minute: number,
+): Promise<Household> {
+  if (
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  )
+    throw new Error("Pick a valid time.");
+  const { data, error } = await client.rpc("set_check_time", {
+    p_household_id: householdId,
+    p_hour: hour,
+    p_minute: minute,
+  });
+  if (error) throw new Error(error.message);
+  return data as Household;
 }
 
 // Live board data. Column lists stay narrow and every list is capped,
