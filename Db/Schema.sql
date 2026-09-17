@@ -45,6 +45,15 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE INDEX IF NOT EXISTS idx_profiles_username_lower ON profiles(lower(username));
 CREATE INDEX IF NOT EXISTS idx_profiles_email_lower ON profiles(lower(email));
 
+-- Usernames are display-only and may repeat, so the unique guard goes.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'profiles_username_key'
+  ) THEN
+    ALTER TABLE public.profiles DROP CONSTRAINT profiles_username_key;
+  END IF;
+END $$;
+
 -- Households, as many as needed. Invite code is how members join.
 CREATE TABLE IF NOT EXISTS households (
     id SERIAL PRIMARY KEY,
@@ -255,12 +264,12 @@ DO $$ BEGIN
 END $$;
 
 -- Builds a profile row for every new login user.
--- Uses the chosen username, falls back to the email prefix on collision.
+-- Uses the chosen display name, falls back to the email prefix.
+-- Duplicates are fine: usernames never identify an account.
 CREATE OR REPLACE FUNCTION handle_new_user()
 RETURNS TRIGGER AS $$
 DECLARE
     base TEXT;
-    candidate TEXT;
 BEGIN
     base := coalesce(
         NEW.raw_user_meta_data ->> 'username',
@@ -270,12 +279,8 @@ BEGIN
     IF base IS NULL OR length(base) < 3 THEN
         base := 'user_' || substr(md5(NEW.id::text), 1, 4);
     END IF;
-    candidate := base;
-    IF EXISTS (SELECT 1 FROM public.profiles WHERE username = candidate) THEN
-        candidate := substr(base, 1, 15) || '_' || substr(md5(NEW.id::text), 1, 4);
-    END IF;
     INSERT INTO public.profiles (id, username, email)
-    VALUES (NEW.id, candidate, NEW.email);
+    VALUES (NEW.id, base, NEW.email);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
@@ -508,11 +513,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
--- Turns a login username into its email, works before sign-in.
-CREATE OR REPLACE FUNCTION get_email_for_username(p_username TEXT)
-RETURNS TEXT AS $$
-    SELECT email FROM public.profiles WHERE lower(username) = lower(trim(p_username));
-$$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public;
+-- Login is email + password straight to auth, so no lookup RPC exists.
 
 -- Claims a free task for the caller, members of that household only.
 CREATE OR REPLACE FUNCTION claim_task(p_task_id INTEGER)
@@ -702,6 +703,50 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- Direct task edits from the app may only touch title and description,
+-- plus the one sanctioned move: the holder releasing a taken/in-review
+-- card back to free with no owner (unclaim). Status moves, ownership and
+-- points otherwise change through RPCs only, which run as definer and
+-- skip this guard (then current_user is not authenticated).
+CREATE OR REPLACE FUNCTION guard_task_edit()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF current_user = 'authenticated' THEN
+        IF NEW.household_id IS DISTINCT FROM OLD.household_id OR
+           NEW.difficulty IS DISTINCT FROM OLD.difficulty OR
+           NEW.points IS DISTINCT FROM OLD.points OR
+           NEW.created_by IS DISTINCT FROM OLD.created_by OR
+           NEW.created_at IS DISTINCT FROM OLD.created_at OR
+           NEW.completed_at IS DISTINCT FROM OLD.completed_at
+        THEN
+            RAISE EXCEPTION 'only title and description can be edited'
+                USING ERRCODE = '42501';
+        END IF;
+        IF NEW.status IS DISTINCT FROM OLD.status OR
+           NEW.owner IS DISTINCT FROM OLD.owner
+        THEN
+            IF NOT (OLD.status IN ('taken', 'in_review')
+                    AND NEW.status = 'free'
+                    AND NEW.owner IS NULL
+                    AND OLD.owner = auth.uid())
+            THEN
+                RAISE EXCEPTION 'status and owner change through app actions only'
+                    USING ERRCODE = '42501';
+            END IF;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = public;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_guard_task_edit') THEN
+    CREATE TRIGGER trg_guard_task_edit
+    BEFORE UPDATE ON tasks
+    FOR EACH ROW EXECUTE FUNCTION guard_task_edit();
+  END IF;
+END $$;
+
 -- Only owners can remove other owners. Admins can still remove members,
 -- and anyone can always remove themselves by leaving.
 CREATE OR REPLACE FUNCTION guard_owner_removal()
@@ -803,6 +848,9 @@ DROP POLICY IF EXISTS "Profiles are viewable by authenticated users" ON profiles
 DROP POLICY IF EXISTS "Users can join as themselves" ON household_members;
 DROP POLICY IF EXISTS "Members can create tasks" ON tasks;
 DROP POLICY IF EXISTS "Members can update tasks" ON tasks;
+DROP POLICY IF EXISTS "Creators and admins can edit open tasks" ON tasks;
+DROP POLICY IF EXISTS "Admins can delete tasks" ON tasks;
+DROP POLICY IF EXISTS "Members can delete tasks" ON tasks;
 DROP POLICY IF EXISTS "Members can write logs" ON activity_logs;
 DROP POLICY IF EXISTS "Avatars are viewable by authenticated users" ON storage.objects;
 DROP POLICY IF EXISTS "Users can update their own avatar" ON storage.objects;
@@ -868,9 +916,28 @@ DO $$ BEGIN
     CREATE POLICY "No direct task updates, RPC only"
     ON tasks FOR UPDATE TO authenticated USING (false);
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'tasks' AND policyname = 'Admins can delete tasks') THEN
-    CREATE POLICY "Admins can delete tasks"
-    ON tasks FOR DELETE TO authenticated USING (is_household_admin(household_id));
+  -- Title/description edits go through a direct UPDATE (not an RPC, so no
+  -- function-cache dependency). Any household member can edit any open
+  -- card; completed cards are frozen. Points, difficulty, status and owner
+  -- cannot change through this path: the app only sets title and
+  -- description, and WITH CHECK plus the guard trigger pin the rest.
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'tasks' AND policyname = 'Members can edit open tasks') THEN
+    CREATE POLICY "Members can edit open tasks"
+    ON tasks FOR UPDATE TO authenticated
+    USING (
+      status <> 'completed' AND is_household_member(household_id)
+    )
+    WITH CHECK (
+      status <> 'completed' AND is_household_member(household_id)
+      AND title <> '' AND char_length(title) <= 60
+    );
+  END IF;
+  -- Any member can delete an unclaimed card. Taken/review/done cards
+  -- are safe from deletes: the flow is unclaim/complete, not remove.
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'tasks' AND policyname = 'Members can delete free tasks') THEN
+    CREATE POLICY "Members can delete free tasks"
+    ON tasks FOR DELETE TO authenticated
+    USING (status = 'free' AND is_household_member(household_id));
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'activity_logs' AND policyname = 'Members can view logs') THEN
     CREATE POLICY "Members can view logs"
@@ -888,14 +955,15 @@ DO $$ BEGIN
   END IF;
 END $$;
 
--- Function access. Email lookup keeps anon because username login
--- happens before sign-in. Maintenance functions leave public entirely.
+-- Function access. Maintenance functions leave public entirely.
+DROP FUNCTION IF EXISTS get_email_for_username(TEXT);
 REVOKE ALL ON FUNCTION decay_strikes() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION prune_activity_logs() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION apply_strike_penalty() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION set_household_check() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION handle_new_user() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION block_currency_selfwrite() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION guard_task_edit() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION guard_owner_removal() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION release_tasks_on_leave() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION is_household_member(INTEGER) FROM PUBLIC, anon;
@@ -911,7 +979,6 @@ REVOKE ALL ON FUNCTION run_due_checks() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION get_household_logs(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION log_activity(INTEGER, TEXT) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION get_email_for_username(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION is_household_member(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION is_household_admin(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION create_household(TEXT) TO authenticated;
@@ -923,7 +990,6 @@ GRANT EXECUTE ON FUNCTION submit_for_review(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_household_logs(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION log_activity(INTEGER, TEXT) TO authenticated;
-GRANT EXECUTE ON FUNCTION get_email_for_username(TEXT) TO anon, authenticated;
 
 -- Private avatar bucket, one folder per user, viewable by housemates.
 insert into storage.buckets (id, name, public)
