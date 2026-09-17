@@ -3,7 +3,9 @@
 // Available = free cards, Claimed = my taken/in-review cards,
 // Review = others' in-review cards, Done = completed cards.
 // Search filters the cache client-side (zero extra queries). Status moves
-// go through the claim/submit/complete RPCs; deletes are member-open.
+// go through the claim/submit RPCs; review completes by unanimous member
+// confirm (single members auto-complete), rejects send cards back to work.
+// Deletes are member-open on free cards only.
 // Realtime comes from the app-wide useLiveHousehold in _layout - this
 // screen only reads the TanStack cache and invalidates after mutations.
 
@@ -20,11 +22,12 @@ import {
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useAuth } from "../system/AuthProvider";
 import {
+  approvalProgress,
   claimTask,
-  completeTask,
   submitForReview,
   useHouseholdMembers,
   useHouseholdTasks,
+  useTaskVotes,
 } from "../system/db";
 import { toMessage } from "../system/errors";
 import { Colors } from "../global/theme";
@@ -77,6 +80,7 @@ export default function Home() {
 
   const tasksQuery = useHouseholdTasks(client, householdId);
   const membersQuery = useHouseholdMembers(client, householdId);
+  const votesQuery = useTaskVotes(client, householdId);
 
   const [tab, setTab] = useState<TabId>("available");
   const [queries, setQueries] = useState<Record<TabId, string>>({
@@ -102,6 +106,8 @@ export default function Home() {
     runAction,
     onAddFavourite,
     onUnclaim,
+    onConfirm,
+    onReject,
     onToggleReminder,
     onPickReminder,
     askDelete,
@@ -145,6 +151,19 @@ export default function Home() {
     if (!q) return base[tab];
     return base[tab].filter((t) => t.title.toLowerCase().includes(q));
   }, [base, queries, tab]);
+
+  // Approval progress for in_review cards ("1 of 2 confirmed"), from the
+  // live votes cache. Null outside review.
+  function progressText(task: Task): string | null {
+    if (task.status !== "in_review") return null;
+    const { confirmed, needed } = approvalProgress(
+      votesQuery.data ?? [],
+      task,
+      membersQuery.data?.length ?? 0,
+    );
+    if (needed <= 0) return null;
+    return `Waiting on approval (${confirmed} of ${needed} confirmed).`;
+  }
 
   // Defensive only: AuthGate redirects logged-out users, but the screen
   // must never crash on null profile/household.
@@ -258,14 +277,14 @@ export default function Home() {
               onSubmitReview={() =>
                 runAction(item, "review", () => submitForReview(client!, item.id))
               }
-              onComplete={() =>
-                runAction(item, "complete", () => completeTask(client!, item.id))
-              }
               onUnclaim={() => onUnclaim(item)}
+              onConfirm={() => onConfirm(item)}
+              onReject={() => onReject(item)}
               onDelete={() => askDelete(item)}
               onToggleFavourite={() => onAddFavourite(item)}
               onToggleReminder={() => onToggleReminder(item)}
               onOpen={() => setDetailTask(item)}
+              reviewProgress={progressText(item)}
             />
           )}
         />

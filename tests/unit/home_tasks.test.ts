@@ -3,11 +3,15 @@
 // only - invalid ids must fail before any backend call.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  approvalProgress,
   claimTask,
   completeTask,
+  confirmTask,
   deleteTask,
+  rejectTask,
   validateTaskInput,
 } from "../../src/system/db";
+import type { Task, TaskVote } from "../../src/system/obj_types";
 import { Lengths, PointsBands } from "../../src/global/constants";
 import { BOB } from "../fake/seed";
 import { FakeClient, emptyDb } from "../fake/fake_supabase";
@@ -126,5 +130,60 @@ describe("task mutation id guards", () => {
     await expect(deleteTask(client, 4242)).rejects.toThrow(
       "Only household members can delete unclaimed tasks.",
     );
+  });
+});
+
+describe("review vote id guards", () => {
+  it.each([0, -1, Number.NaN, 1.5])(
+    "confirmTask(%s) throws before any rpc",
+    async (badId) => {
+      fake.resetCalls();
+      await expect(confirmTask(client, badId)).rejects.toThrow("Pick a task first.");
+      expect(fake.calls.rpc).toBe(0);
+    },
+  );
+
+  it.each([0, -1, Number.NaN, 1.5])(
+    "rejectTask(%s) throws before any rpc",
+    async (badId) => {
+      fake.resetCalls();
+      await expect(rejectTask(client, badId)).rejects.toThrow("Pick a task first.");
+      expect(fake.calls.rpc).toBe(0);
+    },
+  );
+});
+
+describe("approvalProgress", () => {
+  const reviewTask = {
+    id: 9,
+    household_id: 1,
+    title: "Dishes",
+    owner: "user-ana",
+    status: "in_review",
+  } as Task;
+
+  function vote(profile_id: string): TaskVote {
+    return { task_id: 9, profile_id, household_id: 1, created_at: "2026-09-01T00:00:00Z" };
+  }
+
+  it("needs every member except the holder", () => {
+    expect(approvalProgress([], reviewTask, 3)).toEqual({ confirmed: 0, needed: 2 });
+    expect(
+      approvalProgress([vote("user-bob")], reviewTask, 3),
+    ).toEqual({ confirmed: 1, needed: 2 });
+  });
+
+  it("dedupes double votes and caps at needed", () => {
+    const votes = [vote("user-bob"), vote("user-bob"), vote("user-cid")];
+    expect(approvalProgress(votes, reviewTask, 3)).toEqual({ confirmed: 2, needed: 2 });
+  });
+
+  it("ignores votes on other tasks", () => {
+    const other = { ...vote("user-bob"), task_id: 10 };
+    expect(approvalProgress([other], reviewTask, 2)).toEqual({ confirmed: 0, needed: 1 });
+  });
+
+  it("needs nobody when the holder is the only member", () => {
+    expect(approvalProgress([], reviewTask, 1)).toEqual({ confirmed: 0, needed: 0 });
   });
 });

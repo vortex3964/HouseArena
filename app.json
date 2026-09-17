@@ -34,7 +34,8 @@
           "image": "./assets/images/appImages/logo.png",
           "imageWidth": 128
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true,

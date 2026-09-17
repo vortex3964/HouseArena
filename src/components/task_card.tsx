@@ -1,14 +1,16 @@
 // One kanban card for the home board. Status accent on the left edge,
 // points chip on top, owner/difficulty hints below, and per-lane action
-// buttons with busy guards. Tapping the card body opens the magnified
-// detail view (title/description edits live there, via RLS-guarded update).
+// buttons with busy guards. Completion is a household vote: taken cards
+// go For review, others Confirm or Reject, and unanimous confirms pay
+// the holder. Tapping the card body opens the magnified detail view
+// (title/description edits live there, via RLS-guarded update).
 
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
 import type { Task, TaskStatus } from "../system/obj_types";
 
-export type TaskCardAction = "claim" | "review" | "complete" | "unclaim" | "delete" | "favourite" | "reminder";
+export type TaskCardAction = "claim" | "review" | "unclaim" | "confirm" | "reject" | "delete" | "favourite" | "reminder";
 export type TaskCardVariant = "available" | "claimed" | "review" | "done";
 
 const STATUS_ACCENT: Record<TaskStatus, string> = {
@@ -96,12 +98,14 @@ export function TaskCard({
   reminderFireAt,
   onClaim,
   onSubmitReview,
-  onComplete,
   onUnclaim,
+  onConfirm,
+  onReject,
   onDelete,
   onToggleFavourite,
   onToggleReminder,
   onOpen,
+  reviewProgress,
 }: {
   task: Task;
   variant: TaskCardVariant;
@@ -117,13 +121,17 @@ export function TaskCard({
   reminderFireAt: string | null;
   onClaim: () => void;
   onSubmitReview: () => void;
-  onComplete: () => void;
   onUnclaim: () => void;
+  onConfirm: () => void;
+  onReject: () => void;
   onDelete: () => void;
   onToggleFavourite: () => void;
   onToggleReminder: () => void;
   // Opens the magnified detail view for this card.
   onOpen: () => void;
+  // Approval progress for in_review cards, e.g. "2 of 3 confirmed".
+  // Null hides the note.
+  reviewProgress: string | null;
 }) {
   const accent = STATUS_ACCENT[task.status];
   const locked = busy != null;
@@ -203,12 +211,12 @@ export function TaskCard({
           ) : null}
         </View>
 
-        {variant === "claimed" && task.status === "in_review" ? (
-          <Text style={styles.note}>Waiting on review - you can still complete it.</Text>
+        {variant === "claimed" && task.status === "in_review" && reviewProgress ? (
+          <Text style={styles.note}>{reviewProgress}</Text>
         ) : null}
         {variant === "review" ? (
           <Text style={styles.note}>
-            {ownerLabel ?? "A housemate"} is waiting on review - only they can complete it.
+            {reviewProgress ?? `${ownerLabel ?? "A housemate"} is waiting on review.`}
           </Text>
         ) : null}
         {variant === "done" ? (
@@ -245,20 +253,30 @@ export function TaskCard({
             </>
           ) : null}
           {variant === "claimed" && task.status === "in_review" ? (
+            <SmallButton
+              title="Unclaim"
+              icon="arrow-undo"
+              tone="soft"
+              onPress={onUnclaim}
+              loading={busy === "unclaim"}
+              disabled={locked}
+            />
+          ) : null}
+          {variant === "review" ? (
             <>
               <SmallButton
-                title="Complete"
-                icon="checkmark-done"
-                onPress={onComplete}
-                loading={busy === "complete"}
+                title="Confirm"
+                icon="checkmark"
+                onPress={onConfirm}
+                loading={busy === "confirm"}
                 disabled={locked}
               />
               <SmallButton
-                title="Unclaim"
-                icon="arrow-undo"
-                tone="soft"
-                onPress={onUnclaim}
-                loading={busy === "unclaim"}
+                title="Reject"
+                icon="close"
+                tone="danger"
+                onPress={onReject}
+                loading={busy === "reject"}
                 disabled={locked}
               />
             </>

@@ -156,6 +156,19 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 -- Backs the stats query (household + completion-week range scan).
 CREATE INDEX IF NOT EXISTS idx_tasks_household_completed ON tasks(household_id, completed_at);
 
+-- Review approvals: one row per member that confirmed a task.
+-- household_id is denormalized so reads, RLS, and realtime filters stay
+-- on one column. A reject wipes the round; completion wipes it too, so
+-- every review starts empty. Tasks disappearing removes their votes.
+CREATE TABLE IF NOT EXISTS task_votes (
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    profile_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    household_id INTEGER NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (task_id, profile_id)
+);
+CREATE INDEX IF NOT EXISTS idx_votes_household ON task_votes(household_id);
+
 -- Adds completed_at on databases created before it. Nullable add,
 -- existing rows keep NULL and stay untouched.
 DO $$ BEGIN
@@ -167,6 +180,13 @@ DO $$ BEGIN
     ALTER TABLE public.tasks ADD COLUMN completed_at TIMESTAMPTZ;
   END IF;
 END $$;
+
+-- One-time backfill: cards completed before completed_at existed carry
+-- NULL and would vanish from the stats weeks. created_at is the closest
+-- truth available, so use it. New completions always stamp completed_at.
+UPDATE public.tasks
+SET completed_at = created_at
+WHERE status = 'completed' AND completed_at IS NULL AND created_at IS NOT NULL;
 
 -- Widen titles on databases created before VARCHAR(60). Widening never
 -- touches existing data. Matches Lengths.TASK_TITLE in the app.
@@ -220,6 +240,9 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'tasks') THEN
     ALTER PUBLICATION supabase_realtime ADD TABLE public.tasks;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'task_votes') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.task_votes;
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'activity_logs') THEN
     ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
   END IF;
@@ -227,10 +250,11 @@ END $$;
 
 -- Full old rows on DELETE so household_id filters still match server-side.
 -- profiles/households filter on id (always present); household_members has
--- a composite PK containing household_id; only tasks and activity_logs
--- need this. Costs extra WAL per delete on these two tables.
+-- a composite PK containing household_id; tasks, activity_logs and
+-- task_votes need this. Costs extra WAL per delete on these tables.
 ALTER TABLE public.tasks REPLICA IDENTITY FULL;
 ALTER TABLE public.activity_logs REPLICA IDENTITY FULL;
+ALTER TABLE public.task_votes REPLICA IDENTITY FULL;
 
 -- Triggers and functions.
 
@@ -581,12 +605,14 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
 -- Submits a taken task for review. Only the holder can submit, and only
 -- from taken: free cards have nothing to review, completed ones are done.
--- Completing stays open from both taken and in_review, so review is a
--- lane, not a gate.
+-- A lone household member skips review and completes straight away.
+-- Otherwise the card opens a fresh approval round (old votes wiped) and
+-- waits for every other member to confirm.
 CREATE OR REPLACE FUNCTION submit_for_review(p_task_id INTEGER)
 RETURNS tasks AS $$
 DECLARE
     submitted tasks;
+    member_count INTEGER;
     uid UUID := auth.uid();
 BEGIN
     IF uid IS NULL THEN
@@ -603,14 +629,125 @@ BEGIN
         RAISE EXCEPTION 'Task % cannot be reviewed by this user (not owned or not taken)', p_task_id
             USING ERRCODE = 'P0001';
     END IF;
+    SELECT COUNT(*) INTO member_count FROM public.household_members
+    WHERE household_id = submitted.household_id;
+    DELETE FROM public.task_votes WHERE task_id = p_task_id;
+    IF member_count <= 1 THEN
+        UPDATE public.tasks
+        SET status = 'completed', completed_at = now()
+        WHERE id = p_task_id AND owner = uid AND status = 'taken'
+        RETURNING * INTO submitted;
+        IF submitted IS NULL THEN
+            RAISE EXCEPTION 'Task % changed before it could be completed', p_task_id
+                USING ERRCODE = 'P0001';
+        END IF;
+        UPDATE public.profiles
+        SET points = points + submitted.points
+        WHERE id = uid;
+        RETURN submitted;
+    END IF;
     UPDATE public.tasks
     SET status = 'in_review'
     WHERE id = p_task_id AND owner = uid AND status = 'taken'
     RETURNING * INTO submitted;
     IF submitted IS NULL THEN
-        RAISE EXCEPTION 'Task % changed before it could be reviewed', p_task_id USING ERRCODE = 'P0001';
+        RAISE EXCEPTION 'Task % changed before it could be reviewed', p_task_id
+            USING ERRCODE = 'P0001';
     END IF;
     RETURN submitted;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Confirms a task under review. Any member except the holder can confirm,
+-- once each. When every other current member has confirmed, the card
+-- completes and the holder is paid. Returns the task either way.
+CREATE OR REPLACE FUNCTION confirm_task(p_task_id INTEGER)
+RETURNS tasks AS $$
+DECLARE
+    target tasks;
+    updated tasks;
+    needed INTEGER;
+    got INTEGER;
+    uid UUID := auth.uid();
+BEGIN
+    IF uid IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated' USING ERRCODE = 'P0001';
+    END IF;
+    SELECT * INTO target FROM public.tasks WHERE id = p_task_id;
+    IF target IS NULL THEN
+        RAISE EXCEPTION 'Task % does not exist', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    IF NOT is_household_member(target.household_id) THEN
+        RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
+    END IF;
+    IF target.status != 'in_review' THEN
+        RAISE EXCEPTION 'Task % is not under review', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    IF target.owner = uid THEN
+        RAISE EXCEPTION 'The holder cannot confirm their own task' USING ERRCODE = 'P0001';
+    END IF;
+    INSERT INTO public.task_votes (task_id, profile_id, household_id)
+    VALUES (p_task_id, uid, target.household_id)
+    ON CONFLICT DO NOTHING;
+    SELECT COUNT(*) INTO needed FROM public.household_members
+    WHERE household_id = target.household_id AND profile_id IS DISTINCT FROM target.owner;
+    SELECT COUNT(*) INTO got FROM public.task_votes v
+    JOIN public.household_members m
+      ON m.household_id = v.household_id AND m.profile_id = v.profile_id
+    WHERE v.task_id = p_task_id AND v.household_id = target.household_id;
+    IF needed > 0 AND got >= needed THEN
+        UPDATE public.tasks
+        SET status = 'completed', completed_at = now()
+        WHERE id = p_task_id AND status = 'in_review'
+        RETURNING * INTO updated;
+        IF updated IS NULL THEN
+            RAISE EXCEPTION 'Task % changed before it could be completed', p_task_id
+                USING ERRCODE = 'P0001';
+        END IF;
+        UPDATE public.profiles
+        SET points = points + updated.points
+        WHERE id = target.owner;
+        DELETE FROM public.task_votes WHERE task_id = p_task_id;
+        RETURN updated;
+    END IF;
+    SELECT * INTO updated FROM public.tasks WHERE id = p_task_id;
+    RETURN updated;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+-- Rejects a task under review. One rejection is enough: the card goes
+-- back to taken (under work) and the approval round is wiped. Any
+-- member, holder included, can reject.
+CREATE OR REPLACE FUNCTION reject_task(p_task_id INTEGER)
+RETURNS tasks AS $$
+DECLARE
+    target tasks;
+    updated tasks;
+    uid UUID := auth.uid();
+BEGIN
+    IF uid IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated' USING ERRCODE = 'P0001';
+    END IF;
+    SELECT * INTO target FROM public.tasks WHERE id = p_task_id;
+    IF target IS NULL THEN
+        RAISE EXCEPTION 'Task % does not exist', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    IF NOT is_household_member(target.household_id) THEN
+        RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
+    END IF;
+    IF target.status != 'in_review' THEN
+        RAISE EXCEPTION 'Task % is not under review', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    UPDATE public.tasks
+    SET status = 'taken'
+    WHERE id = p_task_id AND status = 'in_review'
+    RETURNING * INTO updated;
+    IF updated IS NULL THEN
+        RAISE EXCEPTION 'Task % changed before it could be sent back', p_task_id
+            USING ERRCODE = 'P0001';
+    END IF;
+    DELETE FROM public.task_votes WHERE task_id = p_task_id;
+    RETURN updated;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
@@ -939,6 +1076,16 @@ DO $$ BEGIN
     ON tasks FOR DELETE TO authenticated
     USING (status = 'free' AND is_household_member(household_id));
   END IF;
+  -- Review votes: members read their household's votes, votes are cast
+  -- through the confirm/reject RPCs only (definer), never directly.
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'task_votes' AND policyname = 'Members can view votes') THEN
+    CREATE POLICY "Members can view votes"
+    ON task_votes FOR SELECT TO authenticated USING (is_household_member(household_id));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'task_votes' AND policyname = 'No direct vote writes, RPC only') THEN
+    CREATE POLICY "No direct vote writes, RPC only"
+    ON task_votes FOR ALL TO authenticated USING (false) WITH CHECK (false);
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'activity_logs' AND policyname = 'Members can view logs') THEN
     CREATE POLICY "Members can view logs"
     ON activity_logs FOR SELECT TO authenticated
@@ -974,6 +1121,8 @@ REVOKE ALL ON FUNCTION leave_household(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION claim_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION complete_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION submit_for_review(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION confirm_task(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION reject_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION run_weekly_check(INTEGER) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION run_due_checks() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) FROM PUBLIC, anon;
@@ -987,6 +1136,8 @@ GRANT EXECUTE ON FUNCTION leave_household(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION claim_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION complete_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION submit_for_review(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION confirm_task(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION reject_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_household_logs(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION log_activity(INTEGER, TEXT) TO authenticated;

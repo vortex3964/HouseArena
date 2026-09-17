@@ -7,9 +7,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useIsFocused } from "expo-router";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  confirmTask,
   deleteTask,
   qk,
   queryClient,
+  rejectTask,
   unclaimTask,
   updateTask,
 } from "../system/db";
@@ -126,6 +128,12 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
     }
   }
 
+  async function refreshVotes() {
+    if (householdId != null) {
+      await queryClient.invalidateQueries({ queryKey: qk.votes(householdId) });
+    }
+  }
+
   // One in-flight action at a time per card (busy guard, no double-submit).
   // Other cards stay usable while one works. Local-only toggles skip the
   // refetch; server mutations refresh the list.
@@ -180,6 +188,20 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
   async function onUnclaim(task: Task) {
     if (!client) return;
     await runAction(task, "unclaim", () => unclaimTask(client, task.id));
+  }
+
+  // Review votes refresh both caches: the card may complete (tasks) and
+  // the counts always move (votes). Errors stay in the action banner.
+  async function onConfirm(task: Task) {
+    if (!client) return;
+    await runAction(task, "confirm", () => confirmTask(client, task.id));
+    await refreshVotes();
+  }
+
+  async function onReject(task: Task) {
+    if (!client) return;
+    await runAction(task, "reject", () => rejectTask(client, task.id));
+    await refreshVotes();
   }
 
   async function onToggleReminder(task: Task) {
@@ -310,6 +332,8 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
     onToggleFavourite,
     onAddFavourite,
     onUnclaim,
+    onConfirm,
+    onReject,
     onToggleReminder,
     onPickReminder,
     saveDetailEdit,

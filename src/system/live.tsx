@@ -23,9 +23,10 @@ function removeById<T extends { id: number }>(list: T[], id: number): T[] {
   return list.filter((r) => r.id !== id);
 }
 
-// One channel per active household, four filtered bindings on it
-// (tasks, members, household meta, member profiles). Logs have their
-// own hook below so the feed is tracked only while its tab is open.
+// One channel per active household, five filtered bindings on it
+// (tasks, members, household meta, member profiles, review votes). Logs
+// have their own hook below so the feed is tracked only while its tab
+// is open.
 // Every payload writes straight into the TanStack cache, zero SELECTs,
 // except a new member join which refetches once to get their profile.
 export function useLiveHousehold(
@@ -132,6 +133,20 @@ export function useLiveHousehold(
         },
       );
     }
+    // Review votes: any change refetches the small votes table so the
+    // approval counts stay right, zero cache surgery.
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "task_votes",
+        filter: `household_id=eq.${householdId}`,
+      },
+      () => {
+        queryClient.invalidateQueries({ queryKey: qk.votes(householdId) });
+      },
+    );
     // Household meta (name, check date): patched into our list.
     channel.on(
       "postgres_changes",

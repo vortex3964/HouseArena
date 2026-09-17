@@ -74,17 +74,18 @@ afterEach(async () => {
 });
 
 describe("subscription setup", () => {
-  it("opens one channel with four filtered bindings, none without a household", () => {
+  it("opens one channel with five filtered bindings, none without a household", () => {
     const { unmount } = renderHook(() =>
       useLiveHousehold(client, ANA.id, 1, [ANA.id, BOB.id]),
     );
     expect(fake.calls.subscribe).toBe(1);
     const bindings = fake.bindingsFor("household-1");
-    expect(bindings).toHaveLength(4);
+    expect(bindings).toHaveLength(5);
     expect(bindings.map((b) => b.table).sort()).toEqual([
       "household_members",
       "households",
       "profiles",
+      "task_votes",
       "tasks",
     ]);
     for (const b of bindings) {
@@ -102,9 +103,11 @@ describe("subscription setup", () => {
   it("skips the profiles binding until member ids are known", () => {
     const { unmount } = renderHook(() => useLiveHousehold(client, ANA.id, 1));
     const bindings = fake.bindingsFor("household-1");
+    // Votes filter on the household, so that binding needs no member ids.
     expect(bindings.map((b) => b.table).sort()).toEqual([
       "household_members",
       "households",
+      "task_votes",
       "tasks",
     ]);
     unmount();

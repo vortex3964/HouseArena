@@ -167,6 +167,25 @@ describe("board fetches", () => {
     }
   });
 
+  it("returns completed_at (stats bucketing depends on it)", async () => {
+    fake.tables.tasks.push({
+      id: 900,
+      household_id: 1,
+      title: "Done thing",
+      description: null,
+      difficulty: "easy",
+      points: 100,
+      status: "completed",
+      owner: ANA.id,
+      created_by: ANA.id,
+      // Oldest date: the page limit is 50 over 55+ seed rows.
+      created_at: "2026-01-01T00:00:05Z",
+      completed_at: "2026-09-15T10:00:00Z",
+    });
+    const tasks = await fetchHouseholdTasks(client, 1);
+    expect(tasks.find((t) => t.id === 900)?.completed_at).toBe("2026-09-15T10:00:00Z");
+  });
+
   it("caps logs newest-first at 30", async () => {
     const logs = await fetchHouseholdLogs(client, 1);
     expect(logs).toHaveLength(30);

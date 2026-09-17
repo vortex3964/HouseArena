@@ -55,8 +55,17 @@ export type MyHousehold = {
   household: Household;
 };
 
-export type ActivityLog = {
-  id: number;
+// One approval on a task under review. Votes reset every round: a reject
+// or a completion wipes the task's rows, so only current-round votes live
+// here. household_id is denormalized for cheap reads and filters.
+export type TaskVote = {
+  task_id: number;
+  profile_id: string;
+  household_id: number;
+  created_at: string;
+};
+
+export type ActivityLog = {  id: number;
   household_id: number;
   owner: string | null;
   details: string | null;

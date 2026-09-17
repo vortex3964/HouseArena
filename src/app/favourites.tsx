@@ -18,10 +18,11 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { useIsFocused } from "expo-router";
 import { useAuth } from "../system/AuthProvider";
 import {
+  approvalProgress,
   claimTask,
-  completeTask,
   submitForReview,
   useHouseholdMembers,
+  useTaskVotes,
 } from "../system/db";
 import { toMessage } from "../system/errors";
 import {
@@ -45,6 +46,7 @@ export default function Favourites() {
   const householdId = activeHousehold?.household.id ?? null;
   const myId = sessionUserId ?? profile?.id ?? null;
   const membersQuery = useHouseholdMembers(client, householdId);
+  const votesQuery = useTaskVotes(client, householdId);
 
   const {
     busy,
@@ -56,6 +58,8 @@ export default function Favourites() {
     runAction,
     onToggleFavourite,
     onUnclaim,
+    onConfirm,
+    onReject,
     onToggleReminder,
     onPickReminder,
     askDelete,
@@ -130,6 +134,18 @@ export default function Favourites() {
     if (!q) return entries;
     return entries.filter((e) => e.task.title.toLowerCase().includes(q));
   }, [entries, query]);
+
+  // Approval progress for in_review snapshots, same math as home.
+  function progressText(task: Task): string | null {
+    if (task.status !== "in_review") return null;
+    const { confirmed, needed } = approvalProgress(
+      votesQuery.data ?? [],
+      task,
+      membersQuery.data?.length ?? 0,
+    );
+    if (needed <= 0) return null;
+    return `Waiting on approval (${confirmed} of ${needed} confirmed).`;
+  }
 
   if (!sessionUserId && !dataLoading) {
     return (
@@ -214,14 +230,14 @@ export default function Favourites() {
               onSubmitReview={() =>
                 runAction(task, "review", () => submitForReview(client!, task.id))
               }
-              onComplete={() =>
-                runAction(task, "complete", () => completeTask(client!, task.id))
-              }
               onUnclaim={() => onUnclaim(task)}
+              onConfirm={() => onConfirm(task)}
+              onReject={() => onReject(task)}
               onDelete={() => handleDelete(task)}
               onToggleFavourite={() => handleToggleFavourite(task)}
               onToggleReminder={() => onToggleReminder(task)}
               onOpen={() => setDetailTask(task)}
+              reviewProgress={progressText(task)}
             />
           );
         }}

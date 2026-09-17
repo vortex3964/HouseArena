@@ -20,6 +20,7 @@ import type {
   Profile,
   Task,
   TaskDifficulty,
+  TaskVote,
 } from "./obj_types";
 import { Lengths, Limits, PointsBands, QueryCache } from "../global/constants";
 
@@ -39,6 +40,7 @@ export const qk = {
   tasks: (householdId: number | null) => ["tasks", householdId] as const,
   logs: (householdId: number | null) => ["logs", householdId] as const,
   members: (householdId: number | null) => ["members", householdId] as const,
+  votes: (householdId: number | null) => ["votes", householdId] as const,
 };
 
 // Auth.
@@ -213,7 +215,7 @@ export async function fetchHouseholdTasks(
   const { data, error } = await client
     .from("tasks")
     .select(
-      "id,title,description,difficulty,points,status,household_id,owner,created_by,created_at",
+      "id,title,description,difficulty,points,status,household_id,owner,created_by,created_at,completed_at",
     )
     .eq("household_id", householdId)
     .order("created_at", { ascending: true })
@@ -318,8 +320,9 @@ export async function addLog(
 }
 
 // Moves the caller's taken task into review. The server owns the
-// transition (member + owner + taken checks); completing stays open
-// from both taken and in_review, so review is a lane, not a gate.
+// transition (member + owner + taken checks). A lone member completes
+// straight away; otherwise an approval round opens and every other
+// member must confirm before points are paid.
 export async function submitForReview(
   client: SupabaseClient,
   taskId: number,
@@ -329,6 +332,69 @@ export async function submitForReview(
   });
   if (error) throw new Error(error.message);
   return data as Task;
+}
+
+// Confirms a task under review. Anyone except the holder, once each;
+// the last needed confirm completes the card and pays the holder.
+// The server owns the counting (current members only).
+export async function confirmTask(
+  client: SupabaseClient,
+  taskId: number,
+): Promise<Task> {
+  if (!Number.isInteger(taskId) || taskId <= 0)
+    throw new Error("Pick a task first.");
+  const { data, error } = await client.rpc("confirm_task", {
+    p_task_id: taskId,
+  });
+  if (error) throw new Error(error.message);
+  return data as Task;
+}
+
+// Rejects a task under review. One rejection is enough: the card goes
+// back to taken and the round is wiped. Holder included, any member.
+export async function rejectTask(
+  client: SupabaseClient,
+  taskId: number,
+): Promise<Task> {
+  if (!Number.isInteger(taskId) || taskId <= 0)
+    throw new Error("Pick a task first.");
+  const { data, error } = await client.rpc("reject_task", {
+    p_task_id: taskId,
+  });
+  if (error) throw new Error(error.message);
+  return data as Task;
+}
+
+// Distinct confirms on one card against the approvals needed (every
+// current member except the holder). Pure, so the card note is cheap
+// and unit-testable.
+export function approvalProgress(
+  votes: TaskVote[],
+  task: Task,
+  memberCount: number,
+): { confirmed: number; needed: number } {
+  const needed = Math.max(memberCount - (task.owner ? 1 : 0), 0);
+  const confirmed = Math.min(
+    new Set(
+      votes.filter((v) => v.task_id === task.id).map((v) => v.profile_id),
+    ).size,
+    needed,
+  );
+  return { confirmed, needed };
+}
+
+// All current-round votes in the household. Small table by design (wiped
+// on reject/complete), refetched on focus and patched live.
+export async function fetchTaskVotes(
+  client: SupabaseClient,
+  householdId: number,
+): Promise<TaskVote[]> {
+  const { data, error } = await client
+    .from("task_votes")
+    .select("task_id,profile_id,household_id,created_at")
+    .eq("household_id", householdId);
+  if (error) throw new Error(error.message);
+  return (data ?? []) as TaskVote[];
 }
 
 // Edit validation, shared by updateTask and the detail modal so both
@@ -566,6 +632,20 @@ export function useHouseholdMembers(
     queryKey: qk.members(householdId),
     enabled: !!client && householdId != null,
     queryFn: () => fetchHouseholdMembers(client!, householdId!),
+    staleTime: QueryCache.LIVE_STALE_TIME,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useTaskVotes(
+  client: SupabaseClient | null,
+  householdId: number | null,
+) {
+  return useQuery({
+    queryKey: qk.votes(householdId),
+    enabled: !!client && householdId != null,
+    queryFn: () => fetchTaskVotes(client!, householdId!),
     staleTime: QueryCache.LIVE_STALE_TIME,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
