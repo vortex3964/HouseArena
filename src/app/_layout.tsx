@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -25,7 +25,7 @@ import { ErrorBanner, PrimaryButton } from "../components/auth_ui";
 import { AvatarImage } from "../components/AvatarImage";
 import { AuthProvider, useAuth } from "../system/AuthProvider";
 import { useAvatarUrl } from "../system/avatars";
-import { queryClient } from "../system/db";
+import { queryClient, useHouseholdMembers } from "../system/db";
 import { useLiveHousehold } from "../system/live";
 import { setupNotificationHandler } from "../system/push";
 
@@ -115,12 +115,16 @@ function AppDrawer() {
   const drawerWidth = Math.round(width * 0.65);
   // App-wide live board: one channel for the active household, no UI.
   // Screens just read the TanStack cache through the board hooks.
+  // Member ids scope the profiles binding (live points); observing the
+  // members query here resubscribes it on join/leave, sharing the cache.
   const { client, sessionUserId, activeHousehold } = useAuth();
-  useLiveHousehold(
-    client,
-    sessionUserId,
-    activeHousehold ? activeHousehold.household.id : null,
+  const householdId = activeHousehold ? activeHousehold.household.id : null;
+  const membersQuery = useHouseholdMembers(client, householdId);
+  const memberIds = useMemo(
+    () => (membersQuery.data ?? []).map((m) => m.profile_id),
+    [membersQuery.data],
   );
+  useLiveHousehold(client, sessionUserId, householdId, memberIds);
   return (
     <GestureHandlerRootView
       style={{ flex: 1, backgroundColor: Colors.bgDeep }}

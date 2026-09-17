@@ -74,21 +74,40 @@ afterEach(async () => {
 });
 
 describe("subscription setup", () => {
-  it("opens one channel with three filtered bindings, none without a household", () => {
-    const { unmount } = renderHook(() => useLiveHousehold(client, ANA.id, 1));
+  it("opens one channel with four filtered bindings, none without a household", () => {
+    const { unmount } = renderHook(() =>
+      useLiveHousehold(client, ANA.id, 1, [ANA.id, BOB.id]),
+    );
     expect(fake.calls.subscribe).toBe(1);
     const bindings = fake.bindingsFor("household-1");
-    expect(bindings).toHaveLength(3);
+    expect(bindings).toHaveLength(4);
+    expect(bindings.map((b) => b.table).sort()).toEqual([
+      "household_members",
+      "households",
+      "profiles",
+      "tasks",
+    ]);
+    for (const b of bindings) {
+      if (b.table === "profiles") {
+        expect(b.filter).toContain(ANA.id);
+        expect(b.filter).toContain(BOB.id);
+      } else {
+        expect(b.filter).toContain("eq.1");
+      }
+    }
+    unmount();
+    expect(fake.calls.removeChannel).toBe(1);
+  });
+
+  it("skips the profiles binding until member ids are known", () => {
+    const { unmount } = renderHook(() => useLiveHousehold(client, ANA.id, 1));
+    const bindings = fake.bindingsFor("household-1");
     expect(bindings.map((b) => b.table).sort()).toEqual([
       "household_members",
       "households",
       "tasks",
     ]);
-    for (const b of bindings) {
-      expect(b.filter).toContain("eq.1");
-    }
     unmount();
-    expect(fake.calls.removeChannel).toBe(1);
   });
 
   it("subscribes to nothing without client or household", () => {
@@ -298,6 +317,62 @@ describe("members channel", () => {
       .getQueryData<any[]>(qk.members(1))!
       .find((m) => m.profile_id === "user-charlie")!;
     expect(joined.profile?.username).toBe("charlie");
+    unmount();
+  });
+});
+
+describe("profiles channel", () => {
+  function useMembersLive() {
+    return renderHook(
+      () => {
+        const members = useHouseholdMembers(client, 1);
+        useLiveHousehold(client, ANA.id, 1, [ANA.id, BOB.id]);
+        return members;
+      },
+      { wrapper },
+    );
+  }
+
+  it("patches points, names and photos into the members cache, 0 selects", async () => {
+    const { result, unmount } = useMembersLive();
+    await waitFor(() => expect(result.current.data).toHaveLength(2));
+    const before = queryClient.getQueryData<any[]>(qk.members(1))!;
+    const beforeBob = before.find((m) => m.profile_id === BOB.id)?.profile.points;
+    fake.resetCalls();
+
+    await emitInAct("profiles", "UPDATE", {
+      id: BOB.id,
+      username: "bobby",
+      avatar_url: `${BOB.id}/new.jpg`,
+      points: 400,
+    });
+    const cached = queryClient.getQueryData<any[]>(qk.members(1))!;
+    expect(beforeBob).not.toBe(400);
+    expect(cached.find((m) => m.profile_id === BOB.id)?.profile).toMatchObject({
+      username: "bobby",
+      avatar_url: `${BOB.id}/new.jpg`,
+      points: 400,
+    });
+    // Untouched member keeps its row.
+    expect(cached.find((m) => m.profile_id === ANA.id)?.profile.points).toBe(
+      before.find((m) => m.profile_id === ANA.id)?.profile.points,
+    );
+    expect(fake.calls.select).toBe(0);
+    unmount();
+  });
+
+  it("ignores profile updates for non-members", async () => {
+    const { result, unmount } = useMembersLive();
+    await waitFor(() => expect(result.current.data).toHaveLength(2));
+    fake.resetCalls();
+    await emitInAct("profiles", "UPDATE", {
+      id: "user-stranger",
+      username: "stranger",
+      points: 9999,
+    });
+    const cached = queryClient.getQueryData<any[]>(qk.members(1))!;
+    expect(cached).toHaveLength(2);
+    expect(cached.some((m) => m.profile_id === "user-stranger")).toBe(false);
     unmount();
   });
 });

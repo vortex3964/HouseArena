@@ -6,6 +6,7 @@ import type {
   Household,
   HouseholdMember,
   MyHousehold,
+  Profile,
   Task,
 } from "./obj_types";
 
@@ -22,118 +23,152 @@ function removeById<T extends { id: number }>(list: T[], id: number): T[] {
   return list.filter((r) => r.id !== id);
 }
 
-// One channel per active household, three filtered bindings on it
-// (tasks, members, household meta). Logs have their own hook below so
-// the feed is tracked only while its tab is open.
+// One channel per active household, four filtered bindings on it
+// (tasks, members, household meta, member profiles). Logs have their
+// own hook below so the feed is tracked only while its tab is open.
 // Every payload writes straight into the TanStack cache, zero SELECTs,
 // except a new member join which refetches once to get their profile.
 export function useLiveHousehold(
   client: SupabaseClient | null,
   userId: string | null,
   householdId: number | null,
+  // profile_ids of the current members. Scopes the profiles binding so
+  // only this household's points/names/photos arrive; resubscribes when
+  // the set changes (join/leave).
+  memberIds: string[] = [],
 ) {
+  // Stable key: resubscribe on set change, not on array identity.
+  const memberKey = [...memberIds].sort().join(",");
   useEffect(() => {
     if (!client || householdId == null) return;
 
     const tasksKey = qk.tasks(householdId);
     const membersKey = qk.members(householdId);
 
-    const channel = client
-      .channel(`household-${householdId}`)
-      // Task cards: append, merge edits, drop deletes, oldest first.
-      .on(
+    const channel = client.channel(`household-${householdId}`);
+    // Task cards: append, merge edits, drop deletes, oldest first.
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "tasks",
+        filter: `household_id=eq.${householdId}`,
+      },
+      (payload) => {
+        if (payload.eventType === "DELETE") {
+          const id = (payload.old as { id: number }).id;
+          queryClient.setQueryData<Task[]>(tasksKey, (old) =>
+            old ? removeById(old, id) : old,
+          );
+          return;
+        }
+        const row = payload.new as Task;
+        queryClient.setQueryData<Task[]>(tasksKey, (old) => {
+          const next = upsertById(old ?? [], row);
+          next.sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+          return next;
+        });
+      },
+    );
+    // Members: role edits and leaves patch directly. A fresh join
+    // refetches once because the payload carries no profile row.
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "household_members",
+        filter: `household_id=eq.${householdId}`,
+      },
+      (payload) => {
+        if (payload.eventType === "DELETE") {
+          const left = payload.old as { profile_id: string };
+          queryClient.setQueryData<HouseholdMember[]>(
+            membersKey,
+            (old) =>
+              old?.filter((m) => m.profile_id !== left.profile_id) ?? old,
+          );
+          return;
+        }
+        const row = payload.new as HouseholdMember;
+        if (payload.eventType === "INSERT") {
+          queryClient.invalidateQueries({ queryKey: membersKey });
+          return;
+        }
+        queryClient.setQueryData<HouseholdMember[]>(membersKey, (old) =>
+          (old ?? []).map((m) =>
+            m.profile_id === row.profile_id ? { ...m, ...row } : m,
+          ),
+        );
+      },
+    );
+    // Member profiles (points, names, photos): patched into the members
+    // cache on UPDATE so the leaderboard never shows frozen points.
+    // INSERT/DELETE need no handling here (joins refetch and leaves patch
+    // through the members binding above). Skipped until member ids are
+    // known; the resubscribe below picks them up.
+    if (memberKey) {
+      channel.on(
         "postgres_changes",
         {
-          event: "*",
+          event: "UPDATE",
           schema: "public",
-          table: "tasks",
-          filter: `household_id=eq.${householdId}`,
+          table: "profiles",
+          filter: `id=in.(${memberKey
+            .split(",")
+            .map((id) => `"${id}"`)
+            .join(",")})`,
         },
         (payload) => {
-          if (payload.eventType === "DELETE") {
-            const id = (payload.old as { id: number }).id;
-            queryClient.setQueryData<Task[]>(tasksKey, (old) =>
-              old ? removeById(old, id) : old,
-            );
-            return;
-          }
-          const row = payload.new as Task;
-          queryClient.setQueryData<Task[]>(tasksKey, (old) => {
-            const next = upsertById(old ?? [], row);
-            next.sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
-            return next;
-          });
-        },
-      )
-      // Members: role edits and leaves patch directly. A fresh join
-      // refetches once because the payload carries no profile row.
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "household_members",
-          filter: `household_id=eq.${householdId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "DELETE") {
-            const left = payload.old as { profile_id: string };
-            queryClient.setQueryData<HouseholdMember[]>(
-              membersKey,
-              (old) =>
-                old?.filter((m) => m.profile_id !== left.profile_id) ?? old,
-            );
-            return;
-          }
-          const row = payload.new as HouseholdMember;
-          if (payload.eventType === "INSERT") {
-            queryClient.invalidateQueries({ queryKey: membersKey });
-            return;
-          }
+          const row = payload.new as Profile;
           queryClient.setQueryData<HouseholdMember[]>(membersKey, (old) =>
             (old ?? []).map((m) =>
-              m.profile_id === row.profile_id ? { ...m, ...row } : m,
+              m.profile_id === row.id
+                ? { ...m, profile: { ...m.profile, ...row } as Profile }
+                : m,
             ),
           );
         },
-      )
-      // Household meta (name, check date): patched into our list.
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "households",
-          filter: `id=eq.${householdId}`,
-        },
-        (payload) => {
-          if (!userId) return;
-          if (payload.eventType === "DELETE") {
-            queryClient.setQueryData<MyHousehold[]>(
-              qk.myHouseholds(userId),
-              (old) =>
-                old?.filter((m) => m.household.id !== householdId) ?? old,
-            );
-            return;
-          }
-          const row = payload.new as Household;
+      );
+    }
+    // Household meta (name, check date): patched into our list.
+    channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "households",
+        filter: `id=eq.${householdId}`,
+      },
+      (payload) => {
+        if (!userId) return;
+        if (payload.eventType === "DELETE") {
           queryClient.setQueryData<MyHousehold[]>(
             qk.myHouseholds(userId),
             (old) =>
-              old?.map((m) =>
-                m.household.id === householdId
-                  ? { ...m, household: { ...m.household, ...row } }
-                  : m,
-              ) ?? old,
+              old?.filter((m) => m.household.id !== householdId) ?? old,
           );
-        },
-      )
-      .subscribe();
+          return;
+        }
+        const row = payload.new as Household;
+        queryClient.setQueryData<MyHousehold[]>(
+          qk.myHouseholds(userId),
+          (old) =>
+            old?.map((m) =>
+              m.household.id === householdId
+                ? { ...m, household: { ...m.household, ...row } }
+                : m,
+            ) ?? old,
+        );
+      },
+    );
+    channel.subscribe();
 
     return () => {
       client.removeChannel(channel);
     };
-  }, [client, userId, householdId]);
+  }, [client, userId, householdId, memberKey]);
 }
 
 // Activity feed on its own channel, owned by the logs tab only.
