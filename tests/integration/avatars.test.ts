@@ -141,10 +141,9 @@ describe("updateProfile", () => {
     expect(fake.tables.profiles.find((p) => p.id === ANA.id)?.username).toBe("ana");
   });
 
-  it("maps taken names to the friendly message", async () => {
-    await expect(updateProfile(client, ANA.id, { username: "bob" })).rejects.toThrow(
-      "That username is taken.",
-    );
+  it("allows a duplicate display name", async () => {
+    await updateProfile(client, ANA.id, { username: "bob" });
+    expect(fake.tables.profiles.find((p) => p.id === ANA.id)?.username).toBe("bob");
   });
 
   it("saves avatar paths and no-ops on empty patches", async () => {

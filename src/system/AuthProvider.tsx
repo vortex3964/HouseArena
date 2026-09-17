@@ -31,7 +31,7 @@ import {
   leaveHousehold,
   qk,
   queryClient,
-  signInWithUsername,
+  signInWithEmail,
   signUpWithEmail,
 } from "./db";
 import type { Household, MyHousehold, Profile } from "./obj_types";
@@ -56,7 +56,7 @@ type AuthContextValue = {
   bootError: string | null;
   retryBoot: () => void;
   configureBackend: (url: string, anonKey: string) => Promise<void>;
-  signIn: (username: string, password: string) => Promise<void>;
+  signIn: (email: string, password: string) => Promise<void>;
   signUp: (
     email: string,
     username: string,
@@ -249,11 +249,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // dataLoading is set synchronously with the user id so the gate
   // shows a spinner instead of bouncing through household setup.
   const signIn = useCallback(
-    async (username: string, password: string) => {
+    async (email: string, password: string) => {
       const c = ensureClient();
       setAuthLoading(true);
       try {
-        const uid = await signInWithUsername(c, username, password);
+        const uid = await signInWithEmail(c, email, password);
         setSessionUserId(uid);
         setDataLoading(true);
         await loadSessionData(c, uid);
@@ -275,7 +275,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // No session yet means the email is not confirmed.
           throw new Error(
             "Account created. Open the confirmation mail on this phone " +
-              "and tap the link, then log in with your username + password.",
+              "and tap the link, then log in with your email + password.",
           );
         }
         setSessionUserId(user.id);

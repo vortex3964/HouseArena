@@ -9,8 +9,7 @@ import {
   fetchMyProfile,
   joinHouseholdByCode,
   leaveHousehold,
-  resolveEmailForUsername,
-  signInWithUsername,
+  signInWithEmail,
   signUpWithEmail,
   submitForReview,
 } from "../../src/system/db";
@@ -43,47 +42,40 @@ describe("signUpWithEmail", () => {
 
   it("maps duplicate emails to the friendly taken message", async () => {
     await expect(signUpWithEmail(client, ANA.email, "someone", "secret99")).rejects.toThrow(
-      "That username is taken",
+      "That email is taken",
     );
   });
 
-  it("suffixes a taken username instead of failing", async () => {
+  it("allows a duplicate display name for a new email", async () => {
     const data = await signUpWithEmail(client, "new@mail.com", "ana", "secret99");
     const created = fake.tables.profiles.find((p) => p.id === data.session!.user.id)!;
-    expect(created.username).not.toBe("ana");
-    expect(created.username.startsWith("ana")).toBe(true);
+    expect(created.username).toBe("ana");
   });
 });
 
-describe("signInWithUsername", () => {
-  it("resolves username to email, signs in, returns uid on 1 rpc + 0 selects", async () => {
+describe("signInWithEmail", () => {
+  it("signs in with email + password and returns uid, no rpc", async () => {
     fake.resetCalls();
-    const uid = await signInWithUsername(client, "ANA", "secret12");
+    const uid = await signInWithEmail(client, ANA.email, "secret12");
     expect(uid).toBe(ANA.id);
-    expect(fake.calls.rpc).toBe(1);
+    expect(fake.calls.rpc).toBe(0);
     expect(fake.calls.select).toBe(0);
   });
 
   it("reports unknown users and wrong passwords generically", async () => {
-    await expect(signInWithUsername(client, "nobody", "whatever1")).rejects.toThrow(
-      "No account matches that username + password.",
+    await expect(signInWithEmail(client, "nobody@mail.com", "whatever1")).rejects.toThrow(
+      "No account matches that email + password.",
     );
-    await expect(signInWithUsername(client, "ana", "wrongpass")).rejects.toThrow(
-      "No account matches that username + password.",
+    await expect(signInWithEmail(client, ANA.email, "wrongpass")).rejects.toThrow(
+      "No account matches that email + password.",
     );
   });
 
   it("validates before any backend call", async () => {
     fake.resetCalls();
-    await expect(signInWithUsername(client, "ab", "secret12")).rejects.toThrow();
-    await expect(signInWithUsername(client, "ana", "")).rejects.toThrow("Type your password.");
+    await expect(signInWithEmail(client, "bad", "secret12")).rejects.toThrow();
+    await expect(signInWithEmail(client, ANA.email, "")).rejects.toThrow("Type your password.");
     expect(fake.calls.rpc).toBe(0);
-  });
-});
-
-describe("resolveEmailForUsername", () => {
-  it("finds case-insensitively", async () => {
-    await expect(resolveEmailForUsername(client, "  BOB ")).resolves.toBe(BOB.email);
   });
 });
 

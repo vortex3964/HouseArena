@@ -1,6 +1,6 @@
 // Home board helpers: shared task validation plus id guards on the
 // task RPC mutations. Uses the existing fake double for call counting
-// only — invalid ids must fail before any backend call.
+// only - invalid ids must fail before any backend call.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   claimTask,
@@ -109,6 +109,22 @@ describe("task mutation id guards", () => {
       await expect(deleteTask(client, badId)).rejects.toThrow("Pick a task first.");
       expect(fake.calls.rpc).toBe(0);
       expect(fake.calls.select).toBe(0);
+      expect(fake.calls.delete).toBe(0);
     },
   );
+
+  it("deleteTask removes the row and proves it with the row count", async () => {
+    fake.tables.tasks.push({ id: 11, household_id: 1, title: "Gone" });
+    fake.resetCalls();
+    await expect(deleteTask(client, 11)).resolves.toBeUndefined();
+    expect(fake.calls.delete).toBe(1);
+    expect(fake.tables.tasks.find((t: any) => t.id === 11)).toBeUndefined();
+  });
+
+  it("deleteTask throws a friendly error when nothing was deleted", async () => {
+    fake.resetCalls();
+    await expect(deleteTask(client, 4242)).rejects.toThrow(
+      "Only household members can delete unclaimed tasks.",
+    );
+  });
 });

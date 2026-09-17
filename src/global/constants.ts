@@ -38,7 +38,7 @@ export const Lengths = {
 } as const;
 
 // Allowed points per task difficulty. Mirrors the
-// points_match_difficulty CHECK in Db/Schema.sql — validate
+// points_match_difficulty CHECK in Db/Schema.sql - validate
 // client-side so users get a friendly error, not a raw
 // Postgres constraint violation.
 export const PointsBands = {
@@ -65,4 +65,8 @@ export const Messages = {
   LOGIN_REQUIRED: "You must be logged in.",
   NO_ACTIVE_HOUSEHOLD: "No active household.",
   TYPE_EMAIL_FIRST: "Type your email first.",
+  FAVOURITES_FULL: "Favourites are full (15 max) - remove one first.",
+  FAVOURITES_DUPLICATE: "Already saved - a favourite with the same title and description exists.",
+  REMINDER_NEEDS_BUILD: "Reminders need a dev build - Expo Go can't schedule them.",
+  REMINDER_FUTURE_ONLY: "Pick a future time for the reminder.",
 } as const;

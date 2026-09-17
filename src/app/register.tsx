@@ -104,7 +104,7 @@ export default function Register() {
     <AuthScreen
       eyebrow="HouseArena"
       title="Create account"
-      subtitle="Email plus a unique username and password."
+      subtitle="Email plus a display name and password."
     >
       <BackendGate form={form} backendReady={backendReady} />
 

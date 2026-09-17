@@ -83,7 +83,7 @@ describe("boot", () => {
 });
 
 describe("signIn", () => {
-  it("loads profile, households, and active id on 1 rpc + 2 selects", async () => {
+  it("loads profile, households, and active id on 0 rpc + 2 selects", async () => {
     const { result } = track(renderHook(() => useAuth(), { wrapper }));
     await waitFor(() => expect(result.current.initLoading).toBe(false));
     await act(async () => {
@@ -91,15 +91,16 @@ describe("signIn", () => {
     });
     fake.resetCalls();
     await act(async () => {
-      await result.current.signIn("ana", "secret12");
+      await result.current.signIn(ANA.email, "secret12");
     });
     await waitFor(() => expect(result.current.profile?.username).toBe("ana"));
     expect(result.current.sessionUserId).toBe(ANA.id);
     expect(result.current.households).toHaveLength(2);
     expect(result.current.activeHousehold?.household.id).toBe(1);
-    // Email lookup rpc plus exactly one profile + one households fetch,
-    // even though the SIGNED_IN event fires concurrently (dedup guard).
-    expect(fake.calls.rpc).toBe(1);
+    // Direct email sign-in, no lookup rpc: exactly one profile + one
+    // households fetch, even though the SIGNED_IN event fires
+    // concurrently (dedup guard).
+    expect(fake.calls.rpc).toBe(0);
     expect(fake.calls.select).toBe(2);
   });
 
@@ -110,7 +111,7 @@ describe("signIn", () => {
       await result.current.configureBackend("https://x.supabase.co", "k".repeat(40));
     });
     await act(async () => {
-      await expect(result.current.signIn("ana", "wrongpass")).rejects.toThrow(
+      await expect(result.current.signIn(ANA.email, "wrongpass")).rejects.toThrow(
         "No account matches",
       );
     });
@@ -125,7 +126,7 @@ describe("live profile", () => {
     await waitFor(() => expect(result.current.initLoading).toBe(false));
     await act(async () => {
       await result.current.configureBackend("https://x.supabase.co", "k".repeat(40));
-      await result.current.signIn("ana", "secret12");
+      await result.current.signIn(ANA.email, "secret12");
     });
     await waitFor(() => expect(result.current.profile?.username).toBe("ana"));
     expect(fake.bindingsFor(`profile-${ANA.id}`)).toHaveLength(1);
@@ -155,7 +156,7 @@ describe("household mutations", () => {
     await waitFor(() => expect(hook.result.current.initLoading).toBe(false));
     await act(async () => {
       await hook.result.current.configureBackend("https://x.supabase.co", "k".repeat(40));
-      await hook.result.current.signIn("ana", "secret12");
+      await hook.result.current.signIn(ANA.email, "secret12");
     });
     await waitFor(() => expect(hook.result.current.profile?.username).toBe("ana"));
     return hook;

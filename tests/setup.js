@@ -59,6 +59,9 @@ jest.mock("expo-notifications", () => ({
     data: "ExponentPushToken[testtoken]",
   })),
   setNotificationHandler: jest.fn(),
+  scheduleNotificationAsync: jest.fn(async () => "notif-id-1"),
+  cancelScheduledNotificationAsync: jest.fn(async () => {}),
+  SchedulableTriggerInputTypes: { DATE: "date" },
 }));
 
 // Realtime client construction needs a WebSocket constructor on Node 20.

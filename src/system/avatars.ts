@@ -113,9 +113,5 @@ export async function updateProfile(
     .from("profiles")
     .update(clean)
     .eq("id", userId);
-  if (error) {
-    if (/duplicate|unique|already/i.test(error.message))
-      throw new Error("That username is taken.");
-    throw new Error(error.message);
-  }
+  if (error) throw new Error(error.message);
 }

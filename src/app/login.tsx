@@ -21,7 +21,7 @@ import { BackendGate, useBackendForm, useBusyGuard } from "../components/backend
 
 export default function Login() {
   const { backendReady, authLoading, signIn, configureBackend } = useAuth();
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const passwordRef = useRef<TextInput>(null);
   const form = useBackendForm(backendReady, configureBackend);
@@ -38,8 +38,8 @@ export default function Login() {
   const [resetMsg, setResetMsg] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
 
-  // Runs when Log in is tapped. Username resolves to the register email
-  // through get_email_for_username first, then Supabase signs in.
+  // Runs when Log in is tapped. Email + password go straight to
+  // Supabase; usernames are display-only and never identify an account.
   // Example 1: backend saved + correct login -> configure skipped,
   // signIn succeeds, you go home.
   // Example 2: fresh install -> configureBackend saves codes and builds
@@ -51,7 +51,7 @@ export default function Login() {
     try {
       await loginGuard.run(async () => {
         if (!(await form.ensureBackend())) return;
-        await signIn(username, password);
+        await signIn(email, password);
         router.replace(Routes.HOME);
       });
     } catch (e) {
@@ -117,19 +117,20 @@ export default function Login() {
     <AuthScreen
       eyebrow="HouseArena"
       title="Welcome back"
-      subtitle="Type your username + password to jump into your household."
+      subtitle="Type your email + password to jump into your household."
     >
       {/* First run: no backend saved yet, so ask for codes right away. */}
       <BackendGate form={form} backendReady={backendReady} />
 
       <Field
-        label="Username"
-        icon="person"
-        fieldKey="username"
-        value={username}
-        onChangeText={setUsername}
-        autoComplete="username"
-        textContentType="username"
+        label="Email"
+        icon="mail"
+        fieldKey="email"
+        value={email}
+        onChangeText={setEmail}
+        keyboardType="email-address"
+        autoComplete="email"
+        textContentType="emailAddress"
         returnKeyType="next"
         onSubmitEditing={() => passwordRef.current?.focus()}
         blurOnSubmit={false}

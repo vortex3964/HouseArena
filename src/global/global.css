@@ -7,7 +7,7 @@
   --ctp-surface-1: #261f45; /* cards hover / pressed */
   --ctp-surface-2: #352a5e; /* elevated / modal */
 
-  /* — Semantic backgrounds — */
+  /* - Semantic backgrounds - */
   --bg-deep: var(--ctp-crust);
   --bg-soft: var(--ctp-mantle);
   --bg: var(--ctp-base);
@@ -15,19 +15,19 @@
   --card-hover: var(--ctp-surface-1);
   --elevated: var(--ctp-surface-2);
 
-  /* — Borders (tinted, never grey) — */
+  /* - Borders (tinted, never grey) - */
   --border-soft: rgba(180, 190, 254, 0.12);
   --border: rgba(180, 190, 254, 0.2);
   --border-strong: rgba(203, 166, 247, 0.38);
 
-  /* — Text (Catppuccin Mocha text scale) — */
+  /* - Text (Catppuccin Mocha text scale) - */
   --text: #e9e5fb; /* brighter than stock mocha for contrast on richer black */
   --subtext-1: #bac2de;
   --subtext-0: #9ea2c4;
   --muted: #76709a; /* muted purple-grey, not neutral grey */
   --disabled: #4c4670;
 
-  /* — Catppuccin accents (Mocha) */
+  /* - Catppuccin accents (Mocha) */
   --rosewater: #f5e0dc;
   --flamingo: #f2cdcd;
   --pink: #f5c2e7;
@@ -43,7 +43,7 @@
   --blue: #89b4fa;
   --lavender: #b4befe;
 
-  /* — Semantic actions — */
+  /* - Semantic actions - */
   --primary: var(--mauve);
   --primary-soft: rgba(203, 166, 247, 0.14);
   --primary-strong: #d9bcff;
@@ -55,7 +55,7 @@
   --danger: var(--red);
   --info: var(--blue);
 
-  /* — Shadows / glows (purple tinted) — */
+  /* - Shadows / glows (purple tinted) - */
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
   --glow-primary: 0 0 24px rgba(203, 166, 247, 0.35);
 

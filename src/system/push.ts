@@ -15,7 +15,7 @@ declare const require: (id: string) => any;
 
 let cached: NotificationsModule | null | undefined;
 
-function getNotifications(): NotificationsModule | null {
+export function getNotifications(): NotificationsModule | null {
   if (cached !== undefined) return cached;
   // Expo Go cannot even evaluate this module (it throws on Android),
   // so it is never imported there. Dev and store builds proceed.

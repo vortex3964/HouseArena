@@ -15,10 +15,10 @@ describe("toMessage", () => {
 describe("friendlyAuthError", () => {
   it("maps known auth failures to user text", () => {
     expect(friendlyAuthError(new Error("Invalid login credentials"))).toBe(
-      "No account matches that username + password.",
+      "No account matches that email + password.",
     );
     expect(friendlyAuthError(new Error("User already registered"))).toBe(
-      "That username is taken - try logging in.",
+      "That email is taken - try logging in.",
     );
     expect(friendlyAuthError(new Error("Email not confirmed"))).toContain("Confirm");
     expect(friendlyAuthError(new Error("fetch failed"))).toBe(
@@ -33,7 +33,7 @@ describe("friendlyAuthError", () => {
 
   it("handles plain { message } objects like PostgREST returns", () => {
     expect(friendlyAuthError({ message: "Invalid login credentials" })).toBe(
-      "No account matches that username + password.",
+      "No account matches that email + password.",
     );
     expect(friendlyAuthError({ message: "something broke" })).toBe("something broke");
     expect(friendlyAuthError({ code: 500 })).toBe("[object Object]");
@@ -44,10 +44,10 @@ describe("isBackendDownError", () => {
   it("spots network-like failures only", () => {
     expect(isBackendDownError(new Error("Network request failed"))).toBe(true);
     expect(isBackendDownError(new Error("fetch failed"))).toBe(true);
-    expect(isBackendDownError(new Error("No account matches that username + password."))).toBe(
+    expect(isBackendDownError(new Error("No account matches that email + password."))).toBe(
       false,
     );
-    expect(isBackendDownError(new Error("That username is taken"))).toBe(false);
+    expect(isBackendDownError(new Error("That email is taken"))).toBe(false);
     expect(isBackendDownError({ message: "fetch failed" })).toBe(true);
     expect(isBackendDownError({ message: "No account matches" })).toBe(false);
   });

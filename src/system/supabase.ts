@@ -368,9 +368,9 @@ function errMessage(e: unknown): string {
 export function friendlyAuthError(e: unknown): string {
   const msg = errMessage(e);
   if (/invalid login credentials/i.test(msg))
-    return "No account matches that username + password.";
+    return "No account matches that email + password.";
   if (/user already registered|already exists/i.test(msg))
-    return "That username is taken - try logging in.";
+    return "That email is taken - try logging in.";
   if (/email not confirmed/i.test(msg))
     return "This email was registered while confirmation was on. Confirm it from the old mail, or delete the user in the dashboard and register again.";
   if (/fetch|network|failed/i.test(msg))

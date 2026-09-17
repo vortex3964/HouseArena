@@ -8,6 +8,7 @@ export type FakeCalls = {
   rpc: number;
   upsert: number;
   update: number;
+  delete: number;
   storageUpload: number;
   signedUrl: number;
   subscribe: number;
@@ -73,6 +74,7 @@ class FakeQuery {
   private upsertKeys: string[] = [];
   private updatePatch: any = null;
   private isUpdate = false;
+  private isDelete = false;
 
   constructor(
     private fake: FakeClient,
@@ -114,6 +116,11 @@ class FakeQuery {
   update(patch: any) {
     this.updatePatch = patch;
     this.isUpdate = true;
+    return this;
+  }
+
+  delete() {
+    this.isDelete = true;
     return this;
   }
 
@@ -178,23 +185,18 @@ class FakeQuery {
     const rows = (this.fake.tables[this.table] as any[]).filter((r) =>
       this.filters.every(([col, val]) => r[col] === val),
     );
-    // Mirrors the profiles_username_key unique constraint.
-    if (
-      this.table === "profiles" &&
-      this.updatePatch.username != null &&
-      (this.fake.tables.profiles as any[]).some(
-        (r) => r.username === this.updatePatch.username && !rows.includes(r),
-      )
-    ) {
-      return {
-        data: null,
-        error: {
-          message: 'duplicate key value violates unique constraint "profiles_username_key"',
-        },
-      };
-    }
     for (const r of rows) Object.assign(r, this.updatePatch);
     return { data: rows, error: null };
+  }
+
+  private runDelete() {
+    this.fake.calls.delete++;
+    const table = this.fake.tables[this.table] as any[];
+    const removed = table.filter((r) =>
+      this.filters.every(([col, val]) => r[col] === val),
+    );
+    this.fake.tables[this.table] = table.filter((r) => !removed.includes(r)) as any;
+    return { data: removed, error: null };
   }
 
   then(
@@ -205,9 +207,11 @@ class FakeQuery {
       resolve(
         this.upsertRow
           ? this.runUpsert()
-          : this.isUpdate
-            ? this.runUpdate()
-            : this.runSelect(),
+          : this.isDelete
+            ? this.runDelete()
+            : this.isUpdate
+              ? this.runUpdate()
+              : this.runSelect(),
       );
     } catch (e) {
       if (reject) reject(e);
@@ -272,6 +276,7 @@ export class FakeClient {
     rpc: 0,
     upsert: 0,
     update: 0,
+    delete: 0,
     storageUpload: 0,
     signedUrl: 0,
     subscribe: 0,
@@ -346,6 +351,7 @@ export class FakeClient {
       rpc: 0,
       upsert: 0,
       update: 0,
+      delete: 0,
       storageUpload: 0,
       signedUrl: 0,
       subscribe: 0,
@@ -382,14 +388,11 @@ export class FakeClient {
     }
     const id = `user-${this.tables.nextIds.user++}`;
     this.tables.authUsers.push({ id, email, password });
-    let finalName = username;
-    if (this.tables.profiles.some((p) => p.username === finalName)) {
-      finalName = `${username.slice(0, 15)}_${this.tables.nextIds.user}`;
-    }
     // Mirrors handle_new_user: profile row appears with the signup.
+    // Usernames are display-only and may repeat.
     this.tables.profiles.push({
       id,
-      username: finalName,
+      username,
       email,
       avatar_url: null,
       points: 0,
@@ -447,13 +450,6 @@ export class FakeClient {
   async rpc(name: string, params: any = {}) {
     this.calls.rpc++;
     switch (name) {
-      case "get_email_for_username": {
-        const want = String(params.p_username ?? "").trim().toLowerCase();
-        const hit = this.tables.profiles.find(
-          (p) => String(p.username).toLowerCase() === want,
-        );
-        return { data: hit ? hit.email : null, error: null };
-      }
       case "create_household": {
         const clean = String(params.p_name ?? "").trim();
         if (clean.length < 2)

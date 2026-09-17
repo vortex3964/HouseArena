@@ -1,8 +1,8 @@
 // Data-access layer for HouseArena v2.
 // Every function takes an explicit Supabase client (runtime-configured,
 // see supabase.ts) so screens never import a global that may be null.
-// Auth uses real emails. Login takes username only and resolves the email
-// through the get_email_for_username RPC first.
+// Auth uses real emails. Login takes email + password directly;
+// usernames are display-only and may repeat.
 
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -43,7 +43,8 @@ export const qk = {
 
 // Auth.
 
-// Register with a real email plus a unique username.
+// Register with a real email plus a display name (duplicates allowed,
+// it is only shown on cards and profiles, never used to log in).
 // Example: signUpWithEmail(c, "ana@mail.com", "ana", "secret12")
 export async function signUpWithEmail(
   client: SupabaseClient,
@@ -66,41 +67,25 @@ export async function signUpWithEmail(
   return data;
 }
 
-// Login keeps asking username + password only.
-// Step 1 resolves the username to its email (works while logged out).
-// Step 2 signs in with that email. Wrong names report "no account".
+// Login takes email + password and signs in directly. Usernames are
+// display-only and may repeat, so they can never identify an account.
 // Returns the user id from the session, so callers skip an extra getUser.
-export async function signInWithUsername(
+export async function signInWithEmail(
   client: SupabaseClient,
-  username: string,
+  email: string,
   password: string,
 ): Promise<string> {
-  const uErr = validateUsername(username);
-  if (uErr) throw new Error(uErr);
+  const eErr = validateEmail(email);
+  if (eErr) throw new Error(eErr);
   if (!password) throw new Error("Type your password.");
-  const email = await resolveEmailForUsername(client, username);
   const { data, error } = await client.auth.signInWithPassword({
-    email,
+    email: email.trim().toLowerCase(),
     password,
   });
   if (error) throw new Error(friendlyAuthError(error));
   const uid = data.session?.user?.id ?? null;
   if (!uid) throw new Error("Login worked but no user was returned.");
   return uid;
-}
-
-// Calls the public RPC. Returns the email or throws when unknown.
-export async function resolveEmailForUsername(
-  client: SupabaseClient,
-  username: string,
-): Promise<string> {
-  const { data, error } = await client.rpc("get_email_for_username", {
-    p_username: username.trim(),
-  });
-  if (error) throw new Error(friendlyAuthError(error));
-  if (!data || typeof data !== "string" || !data.includes("@"))
-    throw new Error("No account matches that username + password.");
-  return data;
 }
 
 // Profiles.
@@ -237,6 +222,30 @@ export async function fetchHouseholdTasks(
   return (data ?? []) as Task[];
 }
 
+// Client-side twin of the points_match_difficulty CHECK plus the title
+// length cap. Returns a friendly message or null when valid. Shared by
+// createTask and the create-task form so both agree; RLS still enforces
+// membership, free status, and null owner server-side.
+export function validateTaskInput(input: {
+  title: string;
+  difficulty: TaskDifficulty;
+  points: number;
+}): string | null {
+  const title = input.title.trim();
+  if (!title) return "Type a task title.";
+  if (title.length > Lengths.TASK_TITLE)
+    return `Keep titles under ${Lengths.TASK_TITLE} characters.`;
+  const band = PointsBands[input.difficulty];
+  if (!band) return "Pick a valid difficulty.";
+  if (
+    !Number.isInteger(input.points) ||
+    input.points < band.min ||
+    input.points > band.max
+  )
+    return `${input.difficulty} tasks pay ${band.min}-${band.max} points.`;
+  return null;
+}
+
 // Creates a free task card. Title length and the points band are checked
 // here so a bad value gets a friendly error instead of a raw Postgres
 // constraint violation. RLS still enforces membership, free status, and
@@ -251,22 +260,13 @@ export async function createTask(
     points: number;
   },
 ): Promise<Task> {
+  const err = validateTaskInput({
+    title: input.title,
+    difficulty: input.difficulty,
+    points: input.points,
+  });
+  if (err) throw new Error(err);
   const title = input.title.trim();
-  if (!title) throw new Error("Type a task title.");
-  if (title.length > Lengths.TASK_TITLE)
-    throw new Error(
-      `Keep titles under ${Lengths.TASK_TITLE} characters.`,
-    );
-  const band = PointsBands[input.difficulty];
-  if (!band) throw new Error("Pick a valid difficulty.");
-  if (
-    !Number.isInteger(input.points) ||
-    input.points < band.min ||
-    input.points > band.max
-  )
-    throw new Error(
-      `${input.difficulty} tasks pay ${band.min}-${band.max} points.`,
-    );
   const description = input.description?.trim() || null;
   const { data, error } = await client
     .from("tasks")
@@ -329,6 +329,148 @@ export async function submitForReview(
   });
   if (error) throw new Error(error.message);
   return data as Task;
+}
+
+// Edit validation, shared by updateTask and the detail modal so both
+// agree. Only title and description are editable; points, difficulty,
+// status and owner are frozen after creation. The server re-checks
+// everything (household member, not completed, title rules, plus a guard
+// trigger pinning all other columns) in RLS.
+export function validateTaskEdit(input: {
+  title: string;
+}): string | null {
+  const title = input.title.trim();
+  if (!title) return "Type a task title.";
+  if (title.length > Lengths.TASK_TITLE)
+    return `Keep titles under ${Lengths.TASK_TITLE} characters.`;
+  return null;
+}
+
+// Edits a task's title and description through a direct UPDATE guarded
+// by the "Members can edit open tasks" RLS policy (deliberately
+// not an RPC). Zero rows back means the policy refused: not a household
+// member, card completed, or task gone.
+export async function updateTask(
+  client: SupabaseClient,
+  taskId: number,
+  input: {
+    title: string;
+    description?: string | null;
+  },
+): Promise<Task> {
+  if (!Number.isInteger(taskId) || taskId <= 0)
+    throw new Error("Pick a task first.");
+  const err = validateTaskEdit({ title: input.title });
+  if (err) throw new Error(err);
+  const description = input.description?.trim() ? input.description.trim() : null;
+  const { data, error } = await client
+    .from("tasks")
+    .update({ title: input.title.trim(), description })
+    .eq("id", taskId)
+    .select("*");
+  if (error) {
+    if (error.message.includes("row-level security")) {
+      throw new Error("Only household members can edit open tasks.");
+    }
+    throw new Error(error.message);
+  }
+  const saved = (data as Task[] | null)?.[0];
+  if (!saved) {
+    throw new Error("Only household members can edit open tasks.");
+  }
+  return saved;
+}
+
+// Releases a taken/in-review card back to free with no owner. Only the
+// holder can do it: the guard trigger allows the status/owner move solely
+// for taken/in_review -> free/NULL by the holder, and the RLS policy
+// covers the resulting row. Deliberately a direct UPDATE, not an RPC.
+export async function unclaimTask(
+  client: SupabaseClient,
+  taskId: number,
+): Promise<Task> {
+  if (!Number.isInteger(taskId) || taskId <= 0)
+    throw new Error("Pick a task first.");
+  const { data, error } = await client
+    .from("tasks")
+    .update({ status: "free", owner: null })
+    .eq("id", taskId)
+    .select("*");
+  if (error) {
+    if (/app actions only|row-level security/i.test(error.message)) {
+      throw new Error("Only the holder can unclaim a taken card.");
+    }
+    throw new Error(error.message);
+  }
+  const saved = (data as Task[] | null)?.[0];
+  if (!saved) {
+    throw new Error("Only the holder can unclaim a taken card.");
+  }
+  return saved;
+}
+
+// Claims a free task for the caller. The server owns the transition
+// (member + free checks). Direct UPDATEs are rejected by RLS ("No direct
+// task updates, RPC only"), so this RPC is the only claim path.
+export async function claimTask(
+  client: SupabaseClient,
+  taskId: number,
+): Promise<Task> {
+  if (!Number.isInteger(taskId) || taskId <= 0)
+    throw new Error("Pick a task first.");
+  const { data, error } = await client.rpc("claim_task", {
+    p_task_id: taskId,
+  });
+  if (error) throw new Error(error.message);
+  return data as Task;
+}
+
+// Completes the caller's taken/in-review task and pays its points.
+// The server owns the transition (member + owner + status checks),
+// same RPC-only rule as claiming.
+export async function completeTask(
+  client: SupabaseClient,
+  taskId: number,
+): Promise<Task> {
+  if (!Number.isInteger(taskId) || taskId <= 0)
+    throw new Error("Pick a task first.");
+  const { data, error } = await client.rpc("complete_task", {
+    p_task_id: taskId,
+  });
+  if (error) throw new Error(error.message);
+  return data as Task;
+}
+
+// Deletes an unclaimed task. RLS gates this to household members on free
+// cards only ("Members can delete free tasks"); taken/review/done cards
+// must be unclaimed or completed instead. The button is hidden past free,
+// the policy rejects the rest.
+// NOTE: updates stay narrow on purpose. Title/description edits go through
+// updateTask ("Members can edit open tasks" RLS policy plus a
+// guard trigger pinning every other column); difficulty / points / status /
+// owner cannot be changed after creation except through the move RPCs.
+export async function deleteTask(
+  client: SupabaseClient,
+  taskId: number,
+): Promise<void> {
+  if (!Number.isInteger(taskId) || taskId <= 0)
+    throw new Error("Pick a task first.");
+  // NOTE: a denied DELETE returns zero rows with no error, so the row
+  // count is the only proof anything happened. Never drop the select.
+  const { data, error } = await client
+    .from("tasks")
+    .delete()
+    .eq("id", taskId)
+    .select("id");
+  if (error) {
+    if (/row-level security/i.test(error.message)) {
+      throw new Error("Only household members can delete unclaimed tasks.");
+    }
+    throw new Error(error.message);
+  }
+  if (!data || (data as unknown[]).length === 0) {
+    throw new Error("Only household members can delete unclaimed tasks.");
+  }
 }
 
 // Members with public profile fields only, never emails.
