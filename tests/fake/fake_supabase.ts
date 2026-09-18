@@ -569,6 +569,7 @@ export class FakeClient {
           id: this.tables.nextIds.log++,
           household_id: hid,
           owner: me ? me.username : null,
+          action: String(params.p_action ?? "").trim().slice(0, 30),
           details: String(params.p_details ?? "").trim().slice(0, 500),
           created_at: new Date().toISOString(),
         };

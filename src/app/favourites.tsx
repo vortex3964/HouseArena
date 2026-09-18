@@ -18,6 +18,7 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { useIsFocused } from "expo-router";
 import { useAuth } from "../system/AuthProvider";
 import {
+  addLog,
   approvalProgress,
   createTask,
   submitForReview,
@@ -134,6 +135,9 @@ export default function Favourites() {
         difficulty: task.difficulty,
         points: task.points,
       });
+      addLog(client, householdId, "created", task.title).catch((e) =>
+        console.log("[log] create", task.title, e),
+      );
     });
   }
 

@@ -307,13 +307,17 @@ export async function fetchHouseholdLogs(
 export async function addLog(
   client: SupabaseClient,
   householdId: number,
+  action: string,
   details: string,
 ): Promise<ActivityLog> {
-  const clean = details.trim();
-  if (!clean) throw new Error("Type what happened first.");
+  const cleanAction = action.trim();
+  const cleanDetails = details.trim();
+  if (!cleanAction || !cleanDetails)
+    throw new Error("Action and details are required.");
   const { data, error } = await client.rpc("log_activity", {
     p_household_id: householdId,
-    p_details: clean.slice(0, 500),
+    p_action: cleanAction.slice(0, 30),
+    p_details: cleanDetails.slice(0, 500),
   });
   if (error) throw new Error(error.message);
   return data as ActivityLog;

@@ -22,6 +22,7 @@ import {
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useAuth } from "../system/AuthProvider";
 import {
+  addLog,
   approvalProgress,
   claimTask,
   submitForReview,
@@ -276,10 +277,16 @@ export default function Home() {
               // lives in the favourites tab.
               favourite={false}
               reminderFireAt={reminders[item.id]?.fireAt ?? null}
-              onClaim={() => runAction(item, "claim", () => claimTask(client!, item.id))}
-              onSubmitReview={() =>
-                runAction(item, "review", () => submitForReview(client!, item.id))
-              }
+              onClaim={() => {
+                runAction(item, "claim", () => claimTask(client!, item.id));
+                if (client && householdId != null)
+                  addLog(client, householdId, "claimed", item.title).catch(() => {});
+              }}
+              onSubmitReview={() => {
+                runAction(item, "review", () => submitForReview(client!, item.id));
+                if (client && householdId != null)
+                  addLog(client, householdId, "review", item.title).catch(() => {});
+              }}
               onUnclaim={() => onUnclaim(item)}
               onConfirm={() => onConfirm(item)}
               onReject={() => onReject(item)}

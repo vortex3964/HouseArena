@@ -210,10 +210,11 @@ describe("board fetches", () => {
 describe("addLog", () => {
   it("writes through the RPC with the caller stamped as owner", async () => {
     fake.signInAs(ANA.id);
-    const entry = await addLog(client, 1, "  Ana did the dishes  ");
+    const entry = await addLog(client, 1, "completed", "  Ana did the dishes  ");
     expect(entry).toMatchObject({
       household_id: 1,
       owner: "ana",
+      action: "completed",
       details: "Ana did the dishes",
     });
     expect(entry.id).toBeGreaterThan(0);
@@ -222,21 +223,21 @@ describe("addLog", () => {
   it("rejects empty text client-side without an rpc", async () => {
     fake.signInAs(ANA.id);
     fake.resetCalls();
-    await expect(addLog(client, 1, "   ")).rejects.toThrow(
-      "Type what happened first.",
+    await expect(addLog(client, 1, "completed", "   ")).rejects.toThrow(
+      "Action and details are required.",
     );
     expect(fake.calls.rpc).toBe(0);
   });
 
   it("trims over-long text to the server cap", async () => {
     fake.signInAs(BOB.id);
-    const entry = await addLog(client, 1, "x".repeat(600));
+    const entry = await addLog(client, 1, "created", "x".repeat(600));
     expect(entry.details).toHaveLength(500);
   });
 
   it("refuses writes from non-members", async () => {
     fake.signInAs(CHARLIE.id);
-    await expect(addLog(client, 2, "Sneaky")).rejects.toThrow(
+    await expect(addLog(client, 2, "created", "Sneaky")).rejects.toThrow(
       "Not a member of this household",
     );
   });

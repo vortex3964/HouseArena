@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useIsFocused } from "expo-router";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  addLog,
   boostTask,
   confirmTask,
   deleteTask,
@@ -138,6 +139,15 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
     }
   }
 
+  // Fire-and-forget activity log. Failures are silent: the action itself
+  // already succeeded and logging is best-effort.
+  function logTask(task: Task, action: string) {
+    if (!client || householdId == null) return;
+    addLog(client, householdId, action, task.title).catch((e) =>
+      console.log("[log]", action, task.title, e),
+    );
+  }
+
   // One in-flight action at a time per card (busy guard, no double-submit).
   // Other cards stay usable while one works. Local-only toggles skip the
   // refetch; server mutations refresh the list.
@@ -192,6 +202,7 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
   async function onUnclaim(task: Task) {
     if (!client) return;
     await runAction(task, "unclaim", () => unclaimTask(client, task.id));
+    logTask(task, "released");
   }
 
   // Review votes refresh both caches: the card may complete (tasks) and
@@ -199,12 +210,14 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
   async function onConfirm(task: Task) {
     if (!client) return;
     await runAction(task, "confirm", () => confirmTask(client, task.id));
+    logTask(task, "confirmed");
     await refreshVotes();
   }
 
   async function onReject(task: Task) {
     if (!client) return;
     await runAction(task, "reject", () => rejectTask(client, task.id));
+    logTask(task, "rejected");
     await refreshVotes();
   }
 
@@ -274,6 +287,7 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
       await deleteTask(client!, task.id);
       after?.();
     });
+    logTask(task, "deleted");
   }
 
   // Every household member can edit and delete tasks; the server owns
@@ -293,6 +307,7 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
     setBoostError(null);
     try {
       const fresh = await boostTask(client, task.id);
+      logTask(task, "boosted");
       await refreshTasks();
       setDetailTask(fresh);
     } catch (e) {
@@ -325,6 +340,7 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
         title: input.title,
         description: input.description,
       });
+      logTask(task, "edited");
       await refreshTasks();
       setDetailTask(fresh);
       return fresh;

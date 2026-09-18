@@ -236,6 +236,7 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     id BIGSERIAL PRIMARY KEY,
     household_id INTEGER NOT NULL REFERENCES households(id) ON DELETE CASCADE,
     owner VARCHAR(20),
+    action VARCHAR(30),
     details TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
@@ -1024,7 +1025,7 @@ $$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public;
 
 -- Logs are written through this RPC so the owner name comes from
 -- the caller account and cannot be forged by other members.
-CREATE OR REPLACE FUNCTION log_activity(p_household_id INTEGER, p_details TEXT)
+CREATE OR REPLACE FUNCTION log_activity(p_household_id INTEGER, p_action TEXT, p_details TEXT)
 RETURNS activity_logs AS $$
 DECLARE
     entry activity_logs;
@@ -1032,10 +1033,11 @@ BEGIN
     IF NOT is_household_member(p_household_id) THEN
         RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
     END IF;
-    INSERT INTO public.activity_logs (household_id, owner, details)
+    INSERT INTO public.activity_logs (household_id, owner, action, details)
     VALUES (
         p_household_id,
         (SELECT username FROM public.profiles WHERE id = auth.uid()),
+        substr(trim(p_action), 1, 30),
         substr(trim(p_details), 1, 500)
     )
     RETURNING * INTO entry;
@@ -1201,7 +1203,7 @@ REVOKE ALL ON FUNCTION run_weekly_check(INTEGER) FROM PUBLIC, anon, authenticate
 REVOKE ALL ON FUNCTION run_due_checks() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION get_household_logs(INTEGER) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION log_activity(INTEGER, TEXT) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION log_activity(INTEGER, TEXT, TEXT) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION is_household_member(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION is_household_admin(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION create_household(TEXT) TO authenticated;
@@ -1215,7 +1217,7 @@ GRANT EXECUTE ON FUNCTION reject_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION boost_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_household_logs(INTEGER) TO authenticated;
-GRANT EXECUTE ON FUNCTION log_activity(INTEGER, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION log_activity(INTEGER, TEXT, TEXT) TO authenticated;
 
 -- Private avatar bucket, one folder per user, viewable by housemates.
 insert into storage.buckets (id, name, public)

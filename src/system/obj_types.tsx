@@ -68,9 +68,11 @@ export type TaskVote = {
   created_at: string;
 };
 
-export type ActivityLog = {  id: number;
+export type ActivityLog = {
+  id: number;
   household_id: number;
   owner: string | null;
+  action: string | null;
   details: string | null;
   created_at: string;
 };

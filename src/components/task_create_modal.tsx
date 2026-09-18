@@ -19,7 +19,7 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { Colors } from "../global/theme";
 import { Lengths, PointsBands } from "../global/constants";
 import { ErrorBanner, PrimaryButton } from "./auth_ui";
-import { createTask, validateTaskInput } from "../system/db";
+import { addLog, createTask, validateTaskInput } from "../system/db";
 import { toMessage } from "../system/errors";
 import type { Task, TaskDifficulty } from "../system/obj_types";
 
@@ -89,6 +89,8 @@ export function TaskCreateModal({
         difficulty,
         points,
       });
+      if (client && householdId != null)
+        addLog(client, householdId, "created", title).catch(() => {});
       onCreated(task);
       reset();
       onClose();
