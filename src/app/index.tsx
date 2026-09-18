@@ -120,6 +120,9 @@ export default function Home() {
     detailError,
     canEdit,
     saveDetailEdit,
+    boosting,
+    boostError,
+    onBoostDetail,
   } = useTaskBoard({
     client,
     myId,
@@ -353,6 +356,11 @@ export default function Home() {
         saveError={detailError}
         onClose={() => setDetailTask(null)}
         onSave={async (input) => (await saveDetailEdit(input)) != null}
+        canBoost={detailTask ? canEdit() : false}
+        myGems={profile?.gems ?? 0}
+        boosting={boosting}
+        boostError={boostError}
+        onBoost={() => void onBoostDetail()}
       />
 
       <Toast message={toast} />

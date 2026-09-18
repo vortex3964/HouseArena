@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useIsFocused } from "expo-router";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  boostTask,
   confirmTask,
   deleteTask,
   qk,
@@ -61,6 +62,8 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
   const [detailTask, setDetailTask] = useState<Task | null>(null);
   const [detailSaving, setDetailSaving] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [boosting, setBoosting] = useState(false);
+  const [boostError, setBoostError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -84,6 +87,7 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
   const detailId = detailTask?.id ?? null;
   useEffect(() => {
     setDetailError(null);
+    setBoostError(null);
   }, [detailId]);
 
   // Reminders are per-user local state, reloaded on account switch and
@@ -279,6 +283,24 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
     return myId != null;
   }
 
+  // Gem boost from the detail modal: spends one of your gems through
+  // boost_task and swaps the open detail to the doubled row. Realtime
+  // plus an explicit refetch keep the board and gem counts right.
+  async function onBoostDetail(): Promise<void> {
+    const task = detailTask;
+    if (!task || !client || boosting) return;
+    setBoosting(true);
+    setBoostError(null);
+    try {
+      const fresh = await boostTask(client, task.id);
+      await refreshTasks();
+      setDetailTask(fresh);
+    } catch (e) {
+      setBoostError(toMessage(e));
+    } finally {
+      setBoosting(false);
+    }
+  }
   // Saves a title/description edit from the detail modal. In server mode
   // it writes the board row and refreshes the list; in snapshot mode it
   // rewrites only the frozen favourite copy. Either way the open detail
@@ -337,6 +359,9 @@ export function useTaskBoard({ client, myId, householdId, members, detailMode }:
     onToggleReminder,
     onPickReminder,
     saveDetailEdit,
+    boosting,
+    boostError,
+    onBoostDetail,
     askDelete,
     pendingDelete,
     cancelDelete,

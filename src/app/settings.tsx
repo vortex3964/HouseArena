@@ -16,18 +16,16 @@ import {
   getBackendConfigSync,
   getDevPrefill,
   loadBackendConfig,
-  validatePassword,
   type BackendConfig,
 } from "../system/supabase";
 import { Colors } from "../global/theme";
 import {
   ErrorBanner,
-  Field,
   PrimaryButton,
 } from "../components/auth_ui";
 
 // Settings lives at the bottom of the drawer. It shows the saved backend
-// values, the active household invite code, and the password changer.
+// values, the active household invite code, and the check time.
 export default function Settings() {
   const { activeHousehold, households, client, dataError, refreshSessionData } =
     useAuth();
@@ -35,11 +33,6 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [showKey, setShowKey] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
-  const [newPw, setNewPw] = useState("");
-  const [confirmPw, setConfirmPw] = useState("");
-  const [pwMsg, setPwMsg] = useState<string | null>(null);
-  const [pwError, setPwError] = useState<string | null>(null);
-  const [changing, setChanging] = useState(false);
   const [draftTime, setDraftTime] = useState(() => new Date());
   const [showPicker, setShowPicker] = useState(false);
   const [checkMsg, setCheckMsg] = useState<string | null>(null);
@@ -111,37 +104,6 @@ export default function Settings() {
       setCheckError(e instanceof Error ? e.message : String(e));
     } finally {
       setSavingCheck(false);
-    }
-  }
-
-  // Swaps to a new password while logged in, for after a temp login.
-  async function onChangePassword() {
-    setPwMsg(null);
-    setPwError(null);
-    const err = validatePassword(newPw);
-    if (err) {
-      setPwError(err);
-      return;
-    }
-    if (newPw !== confirmPw) {
-      setPwError("Passwords don't match.");
-      return;
-    }
-    if (!client) {
-      setPwError("You must be logged in.");
-      return;
-    }
-    setChanging(true);
-    try {
-      const { error } = await client.auth.updateUser({ password: newPw });
-      if (error) throw error;
-      setNewPw("");
-      setConfirmPw("");
-      setPwMsg("Password changed.");
-    } catch (e) {
-      setPwError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setChanging(false);
     }
   }
 
@@ -297,39 +259,6 @@ export default function Settings() {
               : "No active household selected."}
           </Text>
         )}
-      </View>
-
-      <View style={styles.card}>
-        <View style={styles.row}>
-          <Ionicons name="lock-closed" size={18} color={Colors.secondary} />
-          <Text style={styles.cardTitle}>Change password</Text>
-        </View>
-        <Field
-          label="New password"
-          icon="lock-closed"
-          value={newPw}
-          onChangeText={setNewPw}
-          secureTextEntry
-          autoComplete="password"
-          textContentType="newPassword"
-        />
-        <Field
-          label="Confirm new password"
-          icon="checkmark-circle"
-          value={confirmPw}
-          onChangeText={setConfirmPw}
-          secureTextEntry
-          autoComplete="password"
-          textContentType="newPassword"
-          onSubmitEditing={onChangePassword}
-        />
-        <ErrorBanner message={pwError} />
-        {pwMsg ? <Text style={styles.copied}>{pwMsg}</Text> : null}
-        <PrimaryButton
-          title="Change password"
-          onPress={onChangePassword}
-          loading={changing}
-        />
       </View>
 
     </ScrollView>

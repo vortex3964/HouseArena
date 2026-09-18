@@ -268,6 +268,13 @@ function AppDrawer() {
             title: "Profile",
           }}
         />
+        <Drawer.Screen
+          name="member"
+          options={{
+            drawerItemStyle: { display: "none" },
+            title: "Member",
+          }}
+        />
       </Drawer>
     </GestureHandlerRootView>
   );

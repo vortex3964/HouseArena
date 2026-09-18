@@ -19,11 +19,12 @@ import { useIsFocused } from "expo-router";
 import { useAuth } from "../system/AuthProvider";
 import {
   approvalProgress,
-  claimTask,
+  createTask,
   submitForReview,
   useHouseholdMembers,
   useTaskVotes,
 } from "../system/db";
+import { Messages } from "../global/constants";
 import { toMessage } from "../system/errors";
 import {
   getFavourites,
@@ -72,6 +73,9 @@ export default function Favourites() {
     detailError,
     canEdit,
     saveDetailEdit,
+    boosting,
+    boostError,
+    onBoostDetail,
   } = useTaskBoard({
     client,
     myId,
@@ -114,6 +118,23 @@ export default function Favourites() {
 
   function handleDelete(task: Task) {
     askDelete(task, () => void reloadEntries());
+  }
+
+  // "Create task" on a snapshot posts it to the board as a brand-new
+  // free card (new id, no owner) for the whole household to claim.
+  // Snapshot content goes as-is; the points band still applies.
+  async function handleCreate(task: Task) {
+    if (!client) return;
+    await runAction(task, "claim", async () => {
+      if (householdId == null) throw new Error(Messages.NO_ACTIVE_HOUSEHOLD);
+      await createTask(client, {
+        householdId,
+        title: task.title,
+        description: task.description,
+        difficulty: task.difficulty,
+        points: task.points,
+      });
+    });
   }
 
   // After an edit the hook already swapped the stored snapshot, so
@@ -225,8 +246,9 @@ export default function Favourites() {
               busy={busy?.id === task.id ? busy.action : null}
               canDelete={task.status === "free"}
               favourite
+              claimLabel="Create task"
               reminderFireAt={reminders[task.id]?.fireAt ?? null}
-              onClaim={() => runAction(task, "claim", () => claimTask(client!, task.id))}
+              onClaim={() => handleCreate(task)}
               onSubmitReview={() =>
                 runAction(task, "review", () => submitForReview(client!, task.id))
               }
@@ -258,6 +280,11 @@ export default function Favourites() {
         saveError={detailError}
         onClose={() => setDetailTask(null)}
         onSave={handleSaveDetail}
+        canBoost={detailTask ? canEdit() : false}
+        myGems={profile?.gems ?? 0}
+        boosting={boosting}
+        boostError={boostError}
+        onBoost={() => void onBoostDetail()}
       />
 
       <ConfirmDialog

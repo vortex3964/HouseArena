@@ -1,10 +1,12 @@
 // Magnified task view. Tapping a card opens this modal with the full
 // title and description as plain text. The pencil button switches to
 // edit mode (title + body); saving goes through the RLS-guarded update via
-// onSave. Every household member sees the edit button, and
-// completed cards are frozen even for them.
+// onSave. Below it sits the gem boost: one of your gems doubles the
+// card's points through the boost_task RPC. Every household member sees
+// both buttons, completed or already-boosted cards show neither.
 import { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
   Modal,
   Pressable,
   ScrollView,
@@ -34,6 +36,11 @@ export function TaskDetailModal({
   saveError,
   onClose,
   onSave,
+  canBoost,
+  myGems,
+  boosting,
+  boostError,
+  onBoost,
 }: {
   task: Task | null;
   ownerLabel: string | null;
@@ -44,6 +51,13 @@ export function TaskDetailModal({
   onClose: () => void;
   // Truthy on success so the modal can leave edit mode.
   onSave: (input: { title: string; description: string }) => Promise<unknown>;
+  // Same membership rule as editing. The modal hides the button for
+  // completed or already-boosted cards on top of this.
+  canBoost: boolean;
+  myGems: number;
+  boosting: boolean;
+  boostError: string | null;
+  onBoost: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
@@ -62,6 +76,8 @@ export function TaskDetailModal({
   }
 
   const editable = canEdit && task != null && task.status !== "completed";
+  const boostable =
+    canBoost && task != null && task.status !== "completed" && !task.boosted;
 
   return (
     <Modal
@@ -176,6 +192,30 @@ export function TaskDetailModal({
                   <Text style={styles.editText}>Edit</Text>
                 </Pressable>
               ) : null}
+              {!editing && boostable ? (
+                <>
+                  {boostError ? <ErrorBanner message={boostError} /> : null}
+                  <Pressable
+                    onPress={onBoost}
+                    disabled={boosting || myGems < 1}
+                    accessibilityLabel="Double points for 1 gem"
+                    style={({ pressed }) => [
+                      styles.boostBtn,
+                      (boosting || myGems < 1) && styles.btnOff,
+                      pressed && myGems > 0 && !boosting && styles.pressed,
+                    ]}
+                  >
+                    {boosting ? (
+                      <ActivityIndicator size="small" color={Colors.bgDeep} />
+                    ) : (
+                      <Ionicons name="diamond" size={18} color={Colors.bgDeep} />
+                    )}
+                    <Text style={styles.boostText}>
+                      {myGems > 0 ? `Double points` : "No gems left"}
+                    </Text>
+                  </Pressable>
+                </>
+              ) : null}
             </>
           ) : null}
         </Pressable>
@@ -255,5 +295,16 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   editText: { color: Colors.onPrimary, fontSize: 15, fontWeight: "800" },
+  boostBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: Colors.success,
+    borderRadius: 14,
+    paddingVertical: 12,
+  },
+  boostText: { color: Colors.bgDeep, fontSize: 15, fontWeight: "800" },
+  btnOff: { opacity: 0.5 },
   pressed: { opacity: 0.8 },
 });

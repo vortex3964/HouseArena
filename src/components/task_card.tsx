@@ -105,6 +105,7 @@ export function TaskCard({
   onToggleFavourite,
   onToggleReminder,
   onOpen,
+  claimLabel = "Claim",
   reviewProgress,
 }: {
   task: Task;
@@ -120,6 +121,9 @@ export function TaskCard({
   // ISO date of the scheduled reminder, null when none set.
   reminderFireAt: string | null;
   onClaim: () => void;
+  // Button text for the available-lane action. Home claims the card;
+  // favourites recreates it on the board, so it says Create task there.
+  claimLabel?: string;
   onSubmitReview: () => void;
   onUnclaim: () => void;
   onConfirm: () => void;
@@ -226,7 +230,7 @@ export function TaskCard({
         <View style={styles.actions}>
           {variant === "available" ? (
             <SmallButton
-              title="Claim"
+              title={claimLabel}
               icon="bookmark"
               onPress={onClaim}
               loading={busy === "claim"}
