@@ -4,6 +4,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   approvalProgress,
+  boostTask,
   claimTask,
   completeTask,
   confirmTask,
@@ -131,6 +132,14 @@ describe("task mutation id guards", () => {
       "Only household members can delete unclaimed tasks.",
     );
   });
+  it.each([0, -1, Number.NaN, 1.5])(
+    "boostTask(%s) throws before any rpc",
+    async (badId) => {
+      fake.resetCalls();
+      await expect(boostTask(client, badId)).rejects.toThrow("Pick a task first.");
+      expect(fake.calls.rpc).toBe(0);
+    },
+  );
 });
 
 describe("review vote id guards", () => {

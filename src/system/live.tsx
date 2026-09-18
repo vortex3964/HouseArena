@@ -130,6 +130,12 @@ export function useLiveHousehold(
                 : m,
             ),
           );
+          // Own row too: profile screens and gem counts read this key.
+          if (userId && row.id === userId) {
+            queryClient.setQueryData<Profile>(qk.myProfile(userId), (old) =>
+              old ? { ...old, ...row } : old,
+            );
+          }
         },
       );
     }

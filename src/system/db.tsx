@@ -215,7 +215,7 @@ export async function fetchHouseholdTasks(
   const { data, error } = await client
     .from("tasks")
     .select(
-      "id,title,description,difficulty,points,status,household_id,owner,created_by,created_at,completed_at",
+      "id,title,description,difficulty,points,status,household_id,owner,created_by,created_at,completed_at,boosted",
     )
     .eq("household_id", householdId)
     .order("created_at", { ascending: true })
@@ -447,6 +447,22 @@ export async function updateTask(
   return saved;
 }
 
+// Spends one of the caller's gems to double an open card's points.
+// Any member, any open card, once per card. The server owns the checks
+// (member, open, not already boosted, gems balance).
+export async function boostTask(
+  client: SupabaseClient,
+  taskId: number,
+): Promise<Task> {
+  if (!Number.isInteger(taskId) || taskId <= 0)
+    throw new Error("Pick a task first.");
+  const { data, error } = await client.rpc("boost_task", {
+    p_task_id: taskId,
+  });
+  if (error) throw new Error(error.message);
+  return data as Task;
+}
+
 // Releases a taken/in-review card back to free with no owner. Only the
 // holder can do it: the guard trigger allows the status/owner move solely
 // for taken/in_review -> free/NULL by the holder, and the RLS policy
@@ -547,7 +563,7 @@ export async function fetchHouseholdMembers(
   const { data, error } = await client
     .from("household_members")
     .select(
-      "household_id,profile_id,role,joined_at,profile:profiles(id,username,avatar_url,points,gems,wins)",
+      "household_id,profile_id,role,joined_at,profile:profiles(id,username,avatar_url,points,gems,strikes,wins)",
     )
     .eq("household_id", householdId)
     .order("joined_at", { ascending: true })

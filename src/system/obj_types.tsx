@@ -29,6 +29,9 @@ export type Task = {
   created_by: string | null;
   created_at: string;
   completed_at: string | null;
+  // True once a gem doubled the points. Boosted cards skip the points
+  // band and cannot be boosted again.
+  boosted: boolean;
 };
 
 export type Household = {

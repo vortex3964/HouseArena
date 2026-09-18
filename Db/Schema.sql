@@ -119,12 +119,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- When the task was completed, for the weekly stats graph.
     -- Nullable so existing rows are unaffected.
     completed_at TIMESTAMPTZ,
+    -- Set once a gem is spent on the card. Boosted cards pay double and
+    -- are exempt from the points band below (double rarely fits it).
+    boosted BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Points band per difficulty: easy 100-130, medium 200-260, hard 300-400.
+    -- Boosted cards skip the band (doubling rarely fits it).
     CONSTRAINT points_match_difficulty CHECK (
-        (difficulty = 'easy'   AND points >= 100 AND points <= 130) OR
-        (difficulty = 'medium' AND points >= 200 AND points <= 260) OR
-        (difficulty = 'hard'   AND points >= 300 AND points <= 400)
+        boosted OR
+        ((difficulty = 'easy'   AND points >= 100 AND points <= 130) OR
+         (difficulty = 'medium' AND points >= 200 AND points <= 260) OR
+         (difficulty = 'hard'   AND points >= 300 AND points <= 400))
     ),
 
     -- Status and owner must agree with each other.
@@ -169,6 +174,32 @@ CREATE TABLE IF NOT EXISTS task_votes (
 );
 CREATE INDEX IF NOT EXISTS idx_votes_household ON task_votes(household_id);
 
+-- Adds boosted on databases created before it. Spread the default to
+-- existing rows so the NOT NULL add never fails on a full table.
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'tasks'
+      AND column_name = 'boosted'
+  ) THEN
+    ALTER TABLE public.tasks ADD COLUMN boosted BOOLEAN NOT NULL DEFAULT FALSE;
+  END IF;
+END $$;
+-- Widens the points band check so boosted cards (double points) stay
+-- legal. Drop-and-add only touches the rule, never the rows.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'points_match_difficulty') THEN
+    ALTER TABLE public.tasks DROP CONSTRAINT points_match_difficulty;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'points_match_difficulty') THEN
+    ALTER TABLE public.tasks ADD CONSTRAINT points_match_difficulty CHECK (
+        boosted OR
+        ((difficulty = 'easy'   AND points >= 100 AND points <= 130) OR
+         (difficulty = 'medium' AND points >= 200 AND points <= 260) OR
+         (difficulty = 'hard'   AND points >= 300 AND points <= 400))
+    );
+  END IF;
+END $$;
 -- Adds completed_at on databases created before it. Nullable add,
 -- existing rows keep NULL and stay untouched.
 DO $$ BEGIN
@@ -751,6 +782,48 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
+-- Spends one of the caller's gems to double a task's points. Any member
+-- can boost any open card (free, taken, in_review), once each: the
+-- boosted flag blocks a second spend and exempts the row from the points
+-- band. Completed cards cannot be boosted.
+CREATE OR REPLACE FUNCTION boost_task(p_task_id INTEGER)
+RETURNS tasks AS $$
+DECLARE
+    target tasks;
+    updated tasks;
+    spender_gems INTEGER;
+    uid UUID := auth.uid();
+BEGIN
+    IF uid IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated' USING ERRCODE = 'P0001';
+    END IF;
+    SELECT * INTO target FROM public.tasks WHERE id = p_task_id;
+    IF target IS NULL THEN
+        RAISE EXCEPTION 'Task % does not exist', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    IF NOT is_household_member(target.household_id) THEN
+        RAISE EXCEPTION 'Not a member of this household' USING ERRCODE = 'P0001';
+    END IF;
+    IF target.status = 'completed' THEN
+        RAISE EXCEPTION 'Task % is completed and cannot be boosted', p_task_id
+            USING ERRCODE = 'P0001';
+    END IF;
+    IF target.boosted THEN
+        RAISE EXCEPTION 'Task % is already boosted', p_task_id USING ERRCODE = 'P0001';
+    END IF;
+    SELECT gems INTO spender_gems FROM public.profiles WHERE id = uid;
+    IF spender_gems IS NULL OR spender_gems < 1 THEN
+        RAISE EXCEPTION 'You need at least 1 gem to boost' USING ERRCODE = 'P0001';
+    END IF;
+    UPDATE public.profiles SET gems = gems - 1 WHERE id = uid;
+    UPDATE public.tasks
+    SET points = points * 2, boosted = TRUE
+    WHERE id = p_task_id
+    RETURNING * INTO updated;
+    RETURN updated;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
 -- Strike penalty, minus 100 points per strike, wipe at 3 strikes.
 CREATE OR REPLACE FUNCTION apply_strike_penalty()
 RETURNS TRIGGER AS $$
@@ -1123,6 +1196,7 @@ REVOKE ALL ON FUNCTION complete_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION submit_for_review(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION confirm_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION reject_task(INTEGER) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION boost_task(INTEGER) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION run_weekly_check(INTEGER) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION run_due_checks() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) FROM PUBLIC, anon;
@@ -1138,6 +1212,7 @@ GRANT EXECUTE ON FUNCTION complete_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION submit_for_review(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION confirm_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION reject_task(INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION boost_task(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION set_check_time(INTEGER, INTEGER, INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_household_logs(INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION log_activity(INTEGER, TEXT) TO authenticated;

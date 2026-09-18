@@ -27,7 +27,7 @@ function StatBox({
   return (
     <View style={styles.stat}>
       <Ionicons name={icon} size={20} color={color} />
-      <Text style={styles.statValue}>{value.toLocaleString()}</Text>
+      <Text style={styles.statValue}>{(value ?? 0).toLocaleString()}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </View>
   );
