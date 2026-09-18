@@ -314,7 +314,7 @@ function CustomDrawerContent(props: DrawerContentComponentProps) {
           paddingBottom: 12,
         }}
       >
-        <AvatarImage uri={avatarUrl} size={56} />
+        <AvatarImage uri={avatarUrl} size={64} />
         <View style={{ flex: 1 }}>
           <Text
             style={{ color: Colors.text, fontSize: 17, fontWeight: "800" }}

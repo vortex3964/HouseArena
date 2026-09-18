@@ -70,7 +70,7 @@ function PodiumCard({
 }) {
   const body = (
     <View style={[styles.podiumCard, isFirst && styles.podiumCardTall]}>
-      <Avatar user={user} size={isFirst ? 64 : 48} ringColor="rgba(255,255,255,0.85)" />
+      <Avatar user={user} size={isFirst ? 80 : 56} ringColor="rgba(255,255,255,0.85)" />
       <Text style={styles.podiumName} numberOfLines={2}>
         {user.name}
       </Text>
@@ -107,7 +107,7 @@ function RankedRow({
   const body = (
     <View style={styles.row}>
       <Text style={styles.rowRank}>{user.rank}</Text>
-      <Avatar user={user} size={42} />
+      <Avatar user={user} size={48} />
       <View style={styles.rowBody}>
         <Text style={styles.rowName} numberOfLines={1}>
           {user.name}
@@ -244,10 +244,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 10,
   },
-  podiumPress: { flex: 1, maxWidth: 112 },
+  podiumPress: { flex: 1, maxWidth: 120 },
   podiumCard: {
     flex: 1,
-    maxWidth: 112,
+    maxWidth: 120,
     backgroundColor: "rgba(255,255,255,0.14)",
     borderRadius: 20,
     paddingTop: 16,

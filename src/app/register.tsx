@@ -5,7 +5,7 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { Link, router } from "expo-router";
 import { useAuth } from "../system/AuthProvider";
 import { getSupabase } from "../system/supabase";
-import { pickProfilePhoto, updateProfile, uploadAvatar } from "../system/avatars";
+import { pickProfilePhoto, updateProfile, uploadAvatar, type PickedPhoto } from "../system/avatars";
 import { isBackendDownError } from "../system/supabase";
 import { toMessage } from "../system/errors";
 import { Lengths, Messages, Routes } from "../global/constants";
@@ -34,7 +34,7 @@ export default function Register() {
   const [error, setError] = useState<string | null>(null);
   // Optional photo, picked before signup but uploadable only after it
   // (storage path and RLS both key off the new user id).
-  const [avatarUri, setAvatarUri] = useState<string | null>(null);
+  const [avatarPicked, setAvatarPicked] = useState<PickedPhoto | null>(null);
   const [photoError, setPhotoError] = useState<string | null>(null);
   // Upload failed after the account already existed: offer a way out
   // instead of trapping the user, photo stays settable in profile.
@@ -50,9 +50,9 @@ export default function Register() {
   async function onPickAvatar() {
     setPhotoError(null);
     try {
-      const uri = await pickProfilePhoto();
-      if (uri) {
-        setAvatarUri(uri);
+      const picked = await pickProfilePhoto();
+      if (picked) {
+        setAvatarPicked(picked);
         setPhotoBlocked(false);
       }
     } catch (e) {
@@ -71,9 +71,9 @@ export default function Register() {
         // Read the client fresh: on a first install it was just created
         // above, so the render-scope value may still be null here.
         const liveClient = client ?? getSupabase();
-        if (avatarUri && liveClient) {
+        if (avatarPicked && liveClient) {
           try {
-            const path = await uploadAvatar(liveClient, userId, avatarUri);
+            const path = await uploadAvatar(liveClient, userId, avatarPicked);
             await updateProfile(liveClient, userId, { avatar_url: path });
           } catch (e) {
             setPhotoError(toMessage(e));
@@ -110,9 +110,9 @@ export default function Register() {
 
       <View style={styles.avatarWrap}>
         <Pressable onPress={onPickAvatar} accessibilityLabel="Choose profile photo">
-          {avatarUri ? (
+          {avatarPicked ? (
             <Image
-              source={{ uri: avatarUri }}
+              source={{ uri: avatarPicked.uri }}
               style={styles.avatarPicked}
               contentFit="cover"
             />

@@ -40,7 +40,7 @@ export function TopBar() {
         accessibilityLabel="Profile"
         onPress={() => router.push(Routes.PROFILE)}
       >
-        <AvatarImage uri={avatarUrl} size={38} />
+        <AvatarImage uri={avatarUrl} size={44} />
       </Pressable>
     </View>
   );

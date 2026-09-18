@@ -58,7 +58,7 @@ export default function Member() {
   return (
     <AuthScreen eyebrow="HouseArena" title="Profile" subtitle={p.username}>
       <View style={styles.center}>
-        <AvatarImage uri={avatarUrl} size={96} />
+        <AvatarImage uri={avatarUrl} size={112} />
       </View>
       <View style={styles.stats}>
         <StatBox icon="star" value={p.points} label="Points" color={Colors.peach} />

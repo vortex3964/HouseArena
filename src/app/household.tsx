@@ -118,7 +118,7 @@ export default function HouseholdScreen() {
             accessibilityLabel={`Open ${m.profile?.username ?? "housemate"} profile`}
             style={({ pressed }) => [styles.memberRow, pressed && styles.pressed]}
           >
-            <AvatarImage uri={photoUrls[m.profile_id] ?? null} size={46} />
+            <AvatarImage uri={photoUrls[m.profile_id] ?? null} size={52} />
             <View style={styles.memberBody}>
               <Text style={styles.memberName} numberOfLines={1}>
                 {m.profile?.username ?? "Housemate"}

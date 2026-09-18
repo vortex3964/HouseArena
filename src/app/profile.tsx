@@ -8,6 +8,7 @@ import {
   updateProfile,
   uploadAvatar,
   useAvatarUrl,
+  type PickedPhoto,
 } from "../system/avatars";
 import { toMessage } from "../system/errors";
 import { AuthScreen, ErrorBanner, Field, PrimaryButton } from "../components/auth_ui";
@@ -39,7 +40,7 @@ export default function Profile() {
 
   const [editing, setEditing] = useState(false);
   const [username, setUsername] = useState("");
-  const [pendingPhoto, setPendingPhoto] = useState<string | null>(null);
+  const [pendingPhoto, setPendingPhoto] = useState<PickedPhoto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -55,8 +56,8 @@ export default function Profile() {
   async function onPickPhoto() {
     setError(null);
     try {
-      const uri = await pickProfilePhoto();
-      if (uri) setPendingPhoto(uri);
+      const picked = await pickProfilePhoto();
+      if (picked) setPendingPhoto(picked);
     } catch (e) {
       setError(toMessage(e));
     }
@@ -98,7 +99,7 @@ export default function Profile() {
         subtitle="Your profile is still loading."
       >
         <View style={styles.center}>
-          <AvatarImage uri={null} size={96} />
+          <AvatarImage uri={null} size={112} />
         </View>
       </AuthScreen>
     );
@@ -109,13 +110,13 @@ export default function Profile() {
       <View style={styles.center}>
         {editing ? (
           <Pressable onPress={onPickPhoto} accessibilityLabel="Change photo">
-            <AvatarImage uri={pendingPhoto ?? avatarUrl} size={96} />
+            <AvatarImage uri={pendingPhoto?.uri ?? avatarUrl} size={112} />
             <View style={styles.badge}>
               <Ionicons name="camera" size={16} color={Colors.onPrimary} />
             </View>
           </Pressable>
         ) : (
-          <AvatarImage uri={avatarUrl} size={96} />
+          <AvatarImage uri={avatarUrl} size={112} />
         )}
       </View>
 

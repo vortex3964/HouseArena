@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import * as ImagePicker from "expo-image-picker";
+import { SaveFormat, manipulateAsync } from "expo-image-manipulator";
 import { validateUsername } from "./supabase";
 
 const AVATARS_BUCKET = "avatars";
 const AVATAR_FILE = "avatar.jpg";
+// Largest rendered avatar is 96px; at 3x that needs 288px source. 1024px
+// leaves plenty of headroom for retina, zoom, and any future use.
+const AVATAR_MAX_SIDE = 1024;
 // Signed URLs live 7 days; the cache expires an hour early so the
 // display layer never serves a dead link.
 const SIGNED_URL_TTL_SECONDS = 60 * 60 * 24 * 7;
@@ -16,9 +20,13 @@ export function avatarPathFor(userId: string): string {
   return `${userId}/${AVATAR_FILE}`;
 }
 
-// Opens the system photo picker with a square crop. Returns the local
-// URI, or null when the user backs out. Throws when access is denied.
-export async function pickProfilePhoto(): Promise<string | null> {
+export type PickedPhoto = { uri: string; width: number; height: number };
+
+// Opens the system photo picker with a square crop. Quality stays at 1:
+// our own encode below decides the final bytes. Returns the local URI,
+// width, and height, or null when the user backs out. Throws when
+// access is denied.
+export async function pickProfilePhoto(): Promise<PickedPhoto | null> {
   const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
   if (!perm.granted)
     throw new Error("Photo access is needed to pick a picture.");
@@ -26,10 +34,29 @@ export async function pickProfilePhoto(): Promise<string | null> {
     mediaTypes: ["images"],
     allowsEditing: true,
     aspect: [1, 1],
-    quality: 0.7,
+    quality: 1,
   });
   if (res.canceled || res.assets.length === 0) return null;
-  return res.assets[0].uri;
+  const asset = res.assets[0];
+  return { uri: asset.uri, width: asset.width, height: asset.height };
+}
+
+// Caps the long side at AVATAR_MAX_SIDE and re-encodes JPEG 0.95 so every
+// stored photo is crisp at display size. Small crops pass through
+// untouched. Throws when the file cannot be read.
+async function normalizeAvatar(
+  localUri: string,
+  width: number,
+  height: number,
+): Promise<string> {
+  if (Math.max(width, height) <= AVATAR_MAX_SIDE) return localUri;
+  const wide = width >= height;
+  const resized = await manipulateAsync(
+    localUri,
+    wide ? [{ resize: { width: AVATAR_MAX_SIDE } }] : [{ resize: { height: AVATAR_MAX_SIDE } }],
+    { compress: 0.95, format: SaveFormat.JPEG },
+  );
+  return resized.uri;
 }
 
 // Uploads to the user's own folder, overwriting any previous photo so
@@ -37,10 +64,11 @@ export async function pickProfilePhoto(): Promise<string | null> {
 export async function uploadAvatar(
   client: SupabaseClient,
   userId: string,
-  localUri: string,
+  picked: PickedPhoto,
 ): Promise<string> {
   const path = avatarPathFor(userId);
-  const res = await fetch(localUri);
+  const normalized = await normalizeAvatar(picked.uri, picked.width, picked.height);
+  const res = await fetch(normalized);
   const blob = await res.blob();
   const { error } = await client.storage
     .from(AVATARS_BUCKET)
